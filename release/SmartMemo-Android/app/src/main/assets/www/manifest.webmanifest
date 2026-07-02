@@ -1,0 +1,14 @@
+{
+  "name": "SmartMemo",
+  "short_name": "SmartMemo",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#05070b",
+  "theme_color": "#05070b",
+  "icons": [
+    { "src": "./assets/smartmemo-logo-180.png", "sizes": "180x180", "type": "image/png" },
+    { "src": "./assets/smartmemo-logo-256.png", "sizes": "256x256", "type": "image/png" },
+    { "src": "./assets/smartmemo-logo-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "./assets/smartmemo-logo-1024.png", "sizes": "1024x1024", "type": "image/png" }
+  ]
+}

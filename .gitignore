@@ -1,0 +1,28 @@
+﻿# Keep this repository focused on the SmartMemo app source and release artifacts.
+*
+
+!.gitignore
+!.gitattributes
+!smartmemo.md
+
+!iphone-memo-app/
+!iphone-memo-app/**
+
+!release/
+!release/SmartMemo-debug.apk
+!release/SmartMemo-Android/
+!release/SmartMemo-Android/**
+
+# Build output and local tooling
+release/SmartMemo-Android/.gradle/
+release/SmartMemo-Android/build/
+release/SmartMemo-Android/app/build/
+release/*.zip
+release/SmartMemo-iPhone-webapp/
+tools/
+
+# Local OS/editor noise
+Thumbs.db
+desktop.ini
+.DS_Store
+
