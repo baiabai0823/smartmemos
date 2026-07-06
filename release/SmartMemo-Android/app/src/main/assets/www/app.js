@@ -14,8 +14,7 @@ let state = {
   notes: [],
   history: [],
   settings: {
-    theme: "dark",
-    notifications: false
+    theme: "dark"
   }
 };
 
@@ -68,10 +67,12 @@ let ui = {
   recoveryOpen: new Set(),
   pendingImport: null,
   lastSelection: null,
+  pendingNativeAlarms: [],
   pendingDrag: null,
   drag: null,
   dragScrollFrame: null,
   folderPan: null,
+  notePan: null,
   suppressClick: false
 };
 
@@ -97,6 +98,8 @@ function uiSvg(type) {
     stack: '<path d="M12 3 4 7l8 4 8-4-8-4Z"/><path d="M4 12l8 4 8-4"/><path d="M4 17l8 4 8-4"/>',
     close: '<path d="M6 6l12 12"/><path d="M18 6 6 18"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/>',
+    eye: '<path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="3"/>',
+    eyeOff: '<path d="M2.5 12s3.5-6 9.5-6c2 0 3.7.6 5.1 1.4"/><path d="M21.5 12s-3.5 6-9.5 6c-2 0-3.7-.6-5.1-1.4"/><path d="M4 4l16 16"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>',
     plusImage: '<rect x="4" y="5" width="16" height="14" rx="2.5"/><path d="M12 9v6"/><path d="M9 12h6"/>',
     move: '<path d="M5 12h14"/><path d="m13 6 6 6-6 6"/>',
     restore: '<path d="M20 6v5h-5"/><path d="M20 11a8 8 0 1 0 2.1 5.4"/><path d="M8 12l2.3 2.3L15.5 9"/>'
@@ -128,6 +131,8 @@ const icon = {
   save: uiSvg("note"),
   close: uiSvg("close"),
   search: uiSvg("search"),
+  eye: uiSvg("eye"),
+  eyeOff: uiSvg("eyeOff"),
   stack: uiSvg("stack"),
   pictureAdd: uiSvg("plusImage"),
   vaultGlyph: uiSvg("stack"),
@@ -289,7 +294,7 @@ function normalizeState() {
   state.folders = Array.isArray(state.folders) ? state.folders : [];
   state.notes = Array.isArray(state.notes) ? state.notes : [];
   state.history = Array.isArray(state.history) ? state.history.filter((entry) => entry?.type !== "version") : [];
-  state.settings = { theme: "dark", notifications: false, ...(state.settings || {}) };
+  state.settings = { theme: "dark", ...(state.settings || {}) };
   plainPasswords = mergePasswordVault(state.passwordVault || {}, plainPasswords);
   delete state.passwordVault;
   state.folders.forEach((folder) => {
@@ -347,7 +352,7 @@ function scheduleSave() {
     setSaveStatus("saving");
     await saveNow().catch(console.error);
     setSaveStatus("completed");
-  }, 520);
+  }, 360);
 }
 
 function setSaveStatus(status) {
@@ -359,7 +364,16 @@ function setSaveStatus(status) {
   badge.textContent = label;
 }
 
+function lockFolderScopedNotes(folderId) {
+  if (!folderId) return;
+  state.notes.forEach((note) => {
+    if (note.folderId === folderId) ui.unlockedNotes.delete(note.id);
+  });
+}
+
 function setView(view, patch = {}) {
+  const previousFolderId = ui.folderId;
+  if (view === "home" && previousFolderId) lockFolderScopedNotes(previousFolderId);
   ui = { ...ui, view, ...patch };
   render();
 }
@@ -522,7 +536,6 @@ function renderHome() {
 
 function renderFolderCard(folder) {
   const locked = folder.hasPassword && !ui.unlockedFolders.has(folder.id);
-  const count = state.notes.filter((note) => note.folderId === folder.id).length;
   const armed = ui.longPressFolderId === folder.id;
   const dragging = ui.drag?.type === "folder" && ui.drag?.folderId === folder.id;
   return `
@@ -534,7 +547,6 @@ function renderFolderCard(folder) {
           ${folder.hasPassword ? `<span class="lock-corner" data-action="lock-folder" data-id="${folder.id}" title="Lock Space">${icon.lock}</span>` : ""}
         </div>
         <h3>${escapeHtml(folder.name || "Untitled Space")}</h3>
-        <p>${locked ? "Locked Space" : `${count} Memos`}</p>
       </div>
       ${armed ? `<span class="long-actions"><span class="long-pin" data-action="pin-folder" data-id="${folder.id}">${pinSvg()}</span><span class="long-delete" data-action="delete-folder" data-id="${folder.id}">${icon.trash}</span></span>` : ""}
     </button>
@@ -831,16 +843,7 @@ function renderSettings() {
         <div class="settings-grid">
           <div class="settings-card">
             <h3>外观</h3>
-            <div class="settings-line">
-              <span>主题颜色</span>
-              <button class="theme-switch ${state.settings.theme === "light" ? "light-on" : "dark-on"}" data-action="theme" title="主题切换">
-                <span>${icon.sun}</span><i></i><span>${icon.moon}</span>
-              </button>
-            </div>
-            <div class="settings-line">
-              <span>浏览器通知</span>
-              <button class="small-btn" data-action="notifications">${state.settings.notifications ? "已开启" : "开启"}</button>
-            </div>
+            
           </div>
           <div class="settings-card">
             <h3>Backup Vault</h3>
@@ -868,12 +871,12 @@ function isRecoveryOpen(target, id, recovery) {
   return Boolean(recovery.enabled || ui.recoveryOpen.has(recoveryOpenKey(target, id)));
 }
 function passwordInput(name, value = "", placeholder = "", extra = "") {
-  const key = `${name}:${placeholder}:${value}`;
+  const key = `${name}:${placeholder}`;
   const shown = ui.revealedPasswords.has(key);
   return `
     <div class="password-wrap">
-      <input name="${name}" type="${shown ? "text" : "password"}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" ${extra} />
-      <button type="button" class="eye-btn" data-action="toggle-password" data-key="${escapeHtml(key)}">${shown ? "Hide" : "View"}</button>
+      <input name="${name}" type="${shown ? "text" : "password"}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" ${extra} inputmode="latin" autocomplete="off" />
+      <button type="button" class="eye-btn ${shown ? "shown" : ""}" data-action="toggle-password" data-key="${escapeHtml(key)}" aria-label="${shown ? "Hide Password" : "Show Password"}">${shown ? icon.eye : icon.eyeOff}</button>
     </div>
   `;
 }
@@ -987,9 +990,10 @@ function modalHtml(modal) {
         <input type="hidden" name="parentId" value="${folder?.parentId || modal.parentId || ""}" />
         <div class="field"><label>Name</label><input name="name" required maxlength="32" value="${escapeHtml(folder?.name || "")}" placeholder="Space Name" /></div>
         <div class="cipher-grid">
-          <div class="field"><label>Cipher</label>${passwordInput("password", folder ? plainPasswords.folders[folder.id] || "" : "", "Enter Or Leave Empty")}</div>
+          <div class="field"><label>Cipher</label>${passwordInput("password", folder ? plainPasswords.folders[folder.id] || "" : "", "English Or Numbers, 4+")}</div>
           <div class="field"><label>Hint</label><input name="hint" value="${escapeHtml(recovery.hint || "")}" placeholder="Hint" /></div>
         </div>
+        ${modal.error ? `<p class="danger-text">${escapeHtml(modal.error)}</p>` : ""}
         <label class="recovery-toggle"><span>Required Recovery Security</span><input type="checkbox" name="recoveryEnabled" ${recovery.enabled ? "checked" : ""} /></label>
         <div class="recovery-fields">
           <div class="field"><input name="question" value="${escapeHtml(recovery.question || "")}" placeholder="Identity Challenge" /></div>
@@ -1046,9 +1050,10 @@ function modalHtml(modal) {
         <h3>Tactical Control Center</h3>
         <input type="hidden" name="id" value="${modal.id}" />
         <div class="cipher-grid">
-          <div class="field"><label>Cipher</label>${passwordInput("password", note ? plainPasswords.notes[note.id] || "" : "", "Enter Or Leave Empty")}</div>
+          <div class="field"><label>Cipher</label>${passwordInput("password", note ? plainPasswords.notes[note.id] || "" : "", "English Or Numbers, 4+")}</div>
           <div class="field"><label>Hint</label><input name="hint" value="${escapeHtml(recovery.hint || "")}" placeholder="Hint" /></div>
         </div>
+        ${modal.error ? `<p class="danger-text">${escapeHtml(modal.error)}</p>` : ""}
         <label class="recovery-toggle"><span>Required Recovery Security</span><input type="checkbox" name="recoveryEnabled" ${recovery.enabled ? "checked" : ""} /></label>
         <div class="recovery-fields">
           <div class="field"><input name="question" value="${escapeHtml(recovery.question || "")}" placeholder="Identity Challenge" /></div>
@@ -1204,6 +1209,14 @@ function daysInMonth(year, month) {
   return new Date(year, month, 0).getDate();
 }
 
+const WHEEL_SPEED = { year: 0.8, month: 1.0, day: 1.2, hour: 1.4, min: 1.6 };
+const WHEEL_STEP_PX = 14;
+
+function tickWheelHaptic() {
+  if (window.SmartMemoAndroid?.tickHaptic) window.SmartMemoAndroid.tickHaptic();
+  else if (navigator.vibrate) navigator.vibrate(8);
+}
+
 function stepWheel(key, dir) {
   if (!ui.wheelDraft) ui.wheelDraft = getWheelParts(new Date(Date.now() + 15 * 60 * 1000));
   const draft = { ...ui.wheelDraft };
@@ -1308,11 +1321,23 @@ function showSilentNotice(message) {
   }, 3000);
 }
 
+function validateCipher(password) {
+  if (!password) return "";
+  if (!/^[A-Za-z0-9]{4,}$/.test(password)) return "Password Must Use 4+ English Letters Or Numbers.";
+  return "";
+}
+
 function saveFolder(form) {
   const data = Object.fromEntries(new FormData(form));
   const name = data.name.trim();
   const password = data.password.trim();
   if (!name) return;
+  const cipherError = validateCipher(password);
+  if (cipherError) {
+    ui.modal = { type: "folderForm", folderId: data.folderId || null, parentId: data.parentId || null, error: cipherError };
+    render();
+    return;
+  }
   let folder = data.folderId ? state.folders.find((item) => item.id === data.folderId) : null;
   if (!folder) {
     folder = { id: uid("folder"), parentId: data.parentId || null, name, hasPassword: false, orderIndex: 0, createdAt: nowIso(), updatedAt: nowIso() };
@@ -1499,6 +1524,12 @@ function saveNotePassword(form) {
   const note = state.notes.find((item) => item.id === data.id);
   if (!note) return;
   const password = data.password.trim();
+  const cipherError = validateCipher(password);
+  if (cipherError) {
+    ui.modal = { type: "notePassword", id: note.id, error: cipherError };
+    render();
+    return;
+  }
   note.hasPassword = Boolean(password);
   note.updatedAt = nowIso();
   if (password) {
@@ -1514,6 +1545,55 @@ function saveNotePassword(form) {
   render();
 }
 
+function scheduleNativeAlarm(note) {
+  if (!note?.reminder || !window.SmartMemoAndroid?.scheduleAlarm) return false;
+  try {
+    return Boolean(window.SmartMemoAndroid.scheduleAlarm(note.reminder.id, Number(note.reminder.fireAt), note.title || "Memo Reminder"));
+  } catch (error) {
+    console.warn("Native alarm schedule failed", error);
+    return false;
+  }
+}
+
+function cancelNativeAlarm(reminderId) {
+  if (!reminderId || !window.SmartMemoAndroid?.cancelAlarm) return;
+  try {
+    window.SmartMemoAndroid.cancelAlarm(reminderId);
+  } catch (error) {
+    console.warn("Native alarm cancel failed", error);
+  }
+}
+
+function triggerAlarmForNote(note, reminder = note?.reminder) {
+  if (!note || !reminder || ui.alarm) return;
+  ui.alarm = { noteId: note.id, reminderId: reminder.id, fireAt: reminder.fireAt };
+  startAlarmVibration();
+  render();
+}
+
+function handleNativeAlarm(reminderId, title = "", fireAt = 0) {
+  const note = state.notes.find((item) => item.reminder?.id === reminderId) || state.notes.find((item) => item.reminder && item.reminder.fireAt <= Date.now() + 1500);
+  if (!note) {
+    ui.pendingNativeAlarms.push({ reminderId, title, fireAt });
+    return;
+  }
+  triggerAlarmForNote(note, note.reminder || { id: reminderId, fireAt });
+}
+
+function flushNativeAlarms() {
+  if (!ui.pendingNativeAlarms.length) return;
+  const queued = [...ui.pendingNativeAlarms];
+  ui.pendingNativeAlarms = [];
+  queued.forEach((alarm) => handleNativeAlarm(alarm.reminderId, alarm.title, alarm.fireAt));
+}
+
+function syncNativeAlarms() {
+  state.notes.forEach((note) => {
+    if (note.reminder?.fireAt > Date.now()) scheduleNativeAlarm(note);
+  });
+}
+
+window.smartMemoNativeAlarm = (reminderId, title, fireAt) => handleNativeAlarm(String(reminderId || ""), String(title || ""), Number(fireAt || 0));
 function saveReminder(form) {
   const data = Object.fromEntries(new FormData(form));
   const note = state.notes.find((item) => item.id === data.id);
@@ -1521,9 +1601,13 @@ function saveReminder(form) {
   let fireAt = 0;
   if (data.mode === "countdown") fireAt = Date.now() + Math.max(1, Number(data.minutes || 1)) * 60 * 1000;
   else fireAt = new Date(data.at).getTime();
+  const previousReminderId = note.reminder?.id;
+  if (previousReminderId) cancelNativeAlarm(previousReminderId);
   note.reminder = { id: uid("alarm"), fireAt, createdAt: nowIso(), expiredArchived: false };
   note.updatedAt = nowIso();
   ui.modal = null;
+  scheduleNativeAlarm(note);
+  setTimeout(checkAlarms, 250);
   ui.wheelDraft = null;
   scheduleSave();
   render();
@@ -1693,7 +1777,7 @@ function restorePreviousVersion() {
 }
 function deleteHistory(id) {
   state.history = state.history.filter((item) => item.id !== id);
-  if (ui.modal?.type === "historyDetail" && ui.modal.id === id) ui.modal = null;
+  ui.modal = null;
   scheduleSave();
   render();
 }
@@ -1733,6 +1817,21 @@ function buildBackupPayload(options = {}) {
   return { payloadState, payloadPasswords };
 }
 
+function utf8ToBase64(value) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+  return btoa(binary);
+}
+
+function nativeSaveBackup(fileName, backupText) {
+  if (!window.SmartMemoAndroid?.saveBackup) return null;
+  const raw = window.SmartMemoAndroid.saveBackup(fileName, utf8ToBase64(backupText));
+  const result = raw ? JSON.parse(raw) : null;
+  if (!result?.ok) throw new Error(result?.message || "Android Save Failed");
+  return result;
+}
+
 async function exportBackup(options = {}) {
   try {
     const { payloadState, payloadPasswords } = buildBackupPayload(options);
@@ -1742,27 +1841,38 @@ async function exportBackup(options = {}) {
       passwords: payloadPasswords,
       passwordManifest: payloadPasswords
     });
-    const blob = new Blob([JSON.stringify(encrypted)], { type: "application/x-smemo" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
     const fileName = `SmartMemo-backup-${Date.now()}.smemo`;
-    a.href = url;
-    a.download = fileName;
-    a.click();
-    URL.revokeObjectURL(url);
-    ui.modal = {
-      type: "result",
-      status: "success",
-      title: "Export Complete",
-      message: `Encrypted Backup Created: ${fileName}`,
-      path: downloadFolderHint()
-    };
+    const backupText = JSON.stringify(encrypted);
+    const nativeResult = nativeSaveBackup(fileName, backupText);
+    if (nativeResult) {
+      ui.modal = {
+        type: "result",
+        status: "success",
+        title: "Mobile Export Complete",
+        message: "Backup File Was Saved On This Phone.",
+        path: nativeResult.path || `Downloads/SmartMemo/${fileName}`
+      };
+    } else {
+      const blob = new Blob([backupText], { type: "application/x-smemo" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName;
+      a.click();
+      URL.revokeObjectURL(url);
+      ui.modal = {
+        type: "result",
+        status: "success",
+        title: "Export Started",
+        message: "Browser Download Started. Please Check Your Downloads Folder.",
+        path: downloadFolderHint()
+      };
+    }
   } catch (error) {
-    ui.modal = { type: "result", status: "error", title: "Export Failed", message: error?.message || "Backup Could Not Be Created." };
+    ui.modal = { type: "result", status: "error", title: "Mobile Export Failed", message: error?.message || "Backup File Was Not Saved On This Phone." };
   }
   render();
 }
-
 async function previewImportBackup(file) {
   const text = await file.text();
   const encrypted = JSON.parse(text);
@@ -1833,28 +1943,17 @@ async function applyImportBackup(imported, options = {}) {
   ui.modal = { type: "result", status: "success", title: "Import Complete", message: "Selected Backup Data Restored." };
   render();
 }
-async function requestNotifications() {
-  if (!("Notification" in window)) return;
-  const result = await Notification.requestPermission();
-  state.settings.notifications = result === "granted";
-  scheduleSave();
-  render();
-}
-
 function checkAlarms() {
   const due = state.notes.find((note) => note.reminder && note.reminder.fireAt <= Date.now());
-  if (!due || ui.alarm) return;
-  ui.alarm = { noteId: due.id, reminderId: due.reminder.id, fireAt: due.reminder.fireAt };
-  startAlarmVibration();
-  if (state.settings.notifications && "Notification" in window && Notification.permission === "granted") {
-    new Notification("SmartMemo", { body: due.title || "Memo Reminder" });
-  }
-  render();
+  triggerAlarmForNote(due);
 }
 
 function snoozeAlarm(noteId) {
   const note = state.notes.find((item) => item.id === noteId);
-  if (note?.reminder) note.reminder.fireAt = Date.now() + 10 * 60 * 1000;
+  if (note?.reminder) {
+    note.reminder.fireAt = Date.now() + 10 * 60 * 1000;
+    scheduleNativeAlarm(note);
+  }
   stopAlarmVibration();
   ui.alarm = null;
   scheduleSave();
@@ -1862,9 +1961,11 @@ function snoozeAlarm(noteId) {
 }
 
 function stopAlarm(noteId) {
+  stopAlarmVibration();
   const note = state.notes.find((item) => item.id === noteId);
   if (note) {
     const reminder = note.reminder || ui.alarm;
+    cancelNativeAlarm(reminder?.id || ui.alarm?.reminderId);
     archiveHistory("expired", note, {
       reminderId: reminder?.id || ui.alarm?.reminderId,
       occurredAt: new Date(reminder?.fireAt || Date.now()).toISOString()
@@ -1988,7 +2089,7 @@ function renderDragLayer() {
   if (drag.type === "folder") {
     const folder = state.folders.find((item) => item.id === drag.folderId);
     const count = state.notes.filter((note) => note.folderId === drag.folderId).length;
-    ghost.innerHTML = `<strong>${escapeHtml(folder?.name || "Untitled Space")}</strong><span>${count} Memos</span>`;
+    ghost.innerHTML = `<strong>${escapeHtml(folder?.name || "Untitled Space")}</strong><span>SmartMemo Space</span>`;
   } else {
     const note = state.notes.find((item) => item.id === drag.noteId);
     ghost.innerHTML = `<strong>${escapeHtml(note?.title || "Untitled Memo")}</strong><span>${escapeHtml(textFromHtml(note?.bodyHtml || "No Body").slice(0, 42))}</span>`;
@@ -2198,6 +2299,7 @@ function lockTarget(target, id) {
 
 function startAlarmVibration() {
   clearInterval(ui.alarmVibrateTimer);
+  if (window.SmartMemoAndroid?.startVibration) window.SmartMemoAndroid.startVibration();
   if (navigator.vibrate) {
     navigator.vibrate([260, 100, 260, 100, 420]);
     ui.alarmVibrateTimer = setInterval(() => navigator.vibrate([260, 100, 260, 100, 420]), 1300);
@@ -2207,6 +2309,7 @@ function startAlarmVibration() {
 function stopAlarmVibration() {
   clearInterval(ui.alarmVibrateTimer);
   ui.alarmVibrateTimer = null;
+  if (window.SmartMemoAndroid?.stopVibration) window.SmartMemoAndroid.stopVibration();
   if (navigator.vibrate) navigator.vibrate(0);
 }
 function hideFormatPopover() {
@@ -2337,9 +2440,23 @@ app.addEventListener("click", async (event) => {
     return;
   }
   if (action === "toggle-password") {
-    if (ui.revealedPasswords.has(target.dataset.key)) ui.revealedPasswords.delete(target.dataset.key);
-    else ui.revealedPasswords.add(target.dataset.key);
-    render();
+    event.preventDefault();
+    event.stopPropagation();
+    const input = target.closest(".password-wrap")?.querySelector("input");
+    if (!input) return;
+    const nextShown = input.type !== "text";
+    const currentValue = input.value;
+    input.type = nextShown ? "text" : "password";
+    input.value = currentValue;
+    target.innerHTML = nextShown ? icon.eye : icon.eyeOff;
+    target.classList.toggle("shown", nextShown);
+    if (target.dataset.key) {
+      if (nextShown) ui.revealedPasswords.add(target.dataset.key);
+      else ui.revealedPasswords.delete(target.dataset.key);
+    }
+    input.focus({ preventScroll: true });
+    const length = input.value.length;
+    try { input.setSelectionRange(length, length); } catch (error) {}
     return;
   }
   if (action === "lock-folder") {
@@ -2472,9 +2589,11 @@ if (action === "back") setView("home", { folderId: null, noteId: null });
     }
   }
   if (action === "delete-history") {
-    deleteHistory(id);
+    ui.modal = { type: "confirm", title: "Delete History Memo", message: "This History Memo Will Be Permanently Deleted.", id, confirmAction: "confirm-delete-history" };
+    render();
     return;
   }
+  if (action === "confirm-delete-history") deleteHistory(id);
   if (action === "note-password") {
     const note = currentNote();
     ui.modal = { type: "notePassword", id: note.id };
@@ -2488,6 +2607,7 @@ if (action === "back") setView("home", { folderId: null, noteId: null });
   }
   if (action === "clear-reminder") {
     const note = state.notes.find((item) => item.id === id);
+    if (note?.reminder) cancelNativeAlarm(note.reminder.id);
     if (note) note.reminder = null;
     ui.modal = null;
     scheduleSave();
@@ -2500,8 +2620,7 @@ if (action === "back") setView("home", { folderId: null, noteId: null });
     ui.modal = { type: "exportPreview" };
     render();
   }
-  if (action === "import-backup") backupPicker.click();
-  if (action === "notifications") await requestNotifications();
+  if (action === "import-backup") backupPicker.click();
   if (action === "snooze-alarm") snoozeAlarm(id);
   if (action === "stop-alarm") stopAlarm(id);
   if (action === "history-detail") {
@@ -2550,9 +2669,25 @@ app.addEventListener("submit", async (event) => {
   }
 });
 
+app.addEventListener("compositionstart", (event) => {
+  if (event.target?.dataset?.action === "search") ui.composingSearch = true;
+});
+
+app.addEventListener("compositionend", (event) => {
+  if (event.target?.dataset?.action !== "search") return;
+  ui.composingSearch = false;
+  ui.search = event.target.value || "";
+  renderPreservingScroll();
+});
+
 app.addEventListener("input", (event) => {
   const target = event.target;
   const action = target?.dataset?.action;
+  if (action === "search") {
+    ui.search = target.value || "";
+    if (!ui.composingSearch) renderPreservingScroll();
+    return;
+  }
   if (action === "edit-title") updateCurrentNote({ title: target.value });
   if (action === "edit-body") updateCurrentNote({ bodyHtml: sanitizeHtml(target.innerHTML) });
 });
@@ -2597,6 +2732,13 @@ app.addEventListener("click", (event) => {
 }, true);
 
 app.addEventListener("pointerdown", (event) => {
+  const wheelCol = event.target.closest(".wheel-col");
+  if (wheelCol) {
+    ui.wheelTouch = { key: wheelCol.dataset.wheelKey, startY: event.clientY, lastY: event.clientY };
+    wheelCol.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+    return;
+  }
   const noteCard = event.target.closest("[data-long-note]");
   const folderCard = event.target.closest("[data-long-folder]");
   const card = noteCard || folderCard;
@@ -2606,6 +2748,7 @@ app.addEventListener("pointerdown", (event) => {
     const note = state.notes.find((item) => item.id === noteCard.dataset.longNote);
     if (note?.hasPassword && !ui.unlockedNotes.has(note.id)) return;
     ui.pendingDrag = { type: "note", noteCard, startX: event.clientX, startY: event.clientY };
+    ui.notePan = { scroll: noteCard.closest(".scroll"), startX: event.clientX, startY: event.clientY, lastY: event.clientY, moved: false };
   }
   if (folderCard && !noteCard) {
     const folder = state.folders.find((item) => item.id === folderCard.dataset.longFolder);
@@ -2619,10 +2762,23 @@ app.addEventListener("pointerdown", (event) => {
     ui.longPressNoteId = noteCard ? noteCard.dataset.longNote : null;
     ui.longPressFolderId = folderCard && !noteCard ? folderCard.dataset.longFolder : null;
     renderPreservingScroll();
-  }, 520);
+  }, 380);
 });
 
 app.addEventListener("pointermove", (event) => {
+  if (ui.wheelTouch) {
+    const dy = event.clientY - ui.wheelTouch.lastY;
+    const speed = WHEEL_SPEED[ui.wheelTouch.key] || 1;
+    const threshold = WHEEL_STEP_PX / speed;
+    if (Math.abs(dy) >= threshold) {
+      const steps = Math.max(1, Math.floor(Math.abs(dy) / threshold));
+      stepWheel(ui.wheelTouch.key, (dy > 0 ? 1 : -1) * steps);
+      tickWheelHaptic();
+      ui.wheelTouch.lastY = event.clientY;
+    }
+    event.preventDefault();
+    return;
+  }
   if (ui.drag) {
     event.preventDefault();
     if (ui.drag.type === "folder") updateFolderDrag(event);
@@ -2641,13 +2797,32 @@ app.addEventListener("pointermove", (event) => {
       return;
     }
   }
+  if (ui.notePan && !ui.longPressNoteId && !ui.longPressFolderId) {
+    const panDx = event.clientX - ui.notePan.startX;
+    const panDy = event.clientY - ui.notePan.startY;
+    if (Math.abs(panDy) > 8 && Math.abs(panDy) > Math.abs(panDx)) {
+      clearTimeout(ui.pressTimer);
+      ui.notePan.moved = true;
+      ui.pendingDrag = null;
+      event.preventDefault();
+      if (ui.notePan.scroll) ui.notePan.scroll.scrollTop -= event.clientY - ui.notePan.lastY;
+      ui.notePan.lastY = event.clientY;
+      return;
+    }
+  }
   if (!ui.pendingDrag) return;
   const dx = Math.abs(event.clientX - ui.pendingDrag.startX);
   const dy = Math.abs(event.clientY - ui.pendingDrag.startY);
-  if (dx + dy <= 8) return;
+  if (!ui.longPressNoteId && !ui.longPressFolderId && dx + dy > 10) {
+    clearTimeout(ui.pressTimer);
+    ui.pendingDrag = null;
+    return;
+  }
+  if (dx + dy <= 4) return;
   if (ui.pendingDrag.type === "note" && ui.longPressNoteId === ui.pendingDrag.noteCard.dataset.longNote) {
     event.preventDefault();
-    beginMemoDrag(ui.pendingDrag.noteCard, event);
+    const liveNoteCard = document.querySelector(`[data-long-note="${ui.pendingDrag.noteCard.dataset.longNote}"]`) || ui.pendingDrag.noteCard;
+    beginMemoDrag(liveNoteCard, event);
   }
   if (ui.pendingDrag.type === "folder" && ui.longPressFolderId === ui.pendingDrag.folderId) {
     event.preventDefault();
@@ -2657,19 +2832,23 @@ app.addEventListener("pointermove", (event) => {
 });
 
 app.addEventListener("pointerup", (event) => {
+  ui.wheelTouch = null;
   clearTimeout(ui.pressTimer);
   if (ui.drag?.type === "folder") finishFolderDrag();
   else if (ui.drag) finishMemoDrag(event);
-  if (ui.folderPan?.moved) ui.suppressClick = true;
+  if (ui.folderPan?.moved || ui.notePan?.moved) ui.suppressClick = true;
   ui.folderPan = null;
+  ui.notePan = null;
   ui.pendingDrag = null;
 });
 
 app.addEventListener("pointercancel", () => {
+  ui.wheelTouch = null;
   clearTimeout(ui.pressTimer);
   ui.drag = null;
   ui.pendingDrag = null;
   ui.folderPan = null;
+  ui.notePan = null;
   ui.longPressNoteId = null;
   ui.longPressFolderId = null;
   stopDragAutoScroll();
@@ -2707,11 +2886,24 @@ function armEditorSelectionTools() {
   app.addEventListener("keyup", schedule);
   app.addEventListener("touchend", schedule, { passive: true });
 }
+function finishSplash() {
+  const splash = document.getElementById("smartmemoSplash");
+  if (!splash) return;
+  setTimeout(() => {
+    splash.classList.add("hide");
+    setTimeout(() => splash.remove(), 260);
+  }, 1000);
+}
+
 async function boot() {
   try {
     await load();
+    syncNativeAlarms();
     render();
+    flushNativeAlarms();
+    finishSplash();
   } catch (error) {
+    finishSplash();
     console.error(error);
     app.innerHTML = `
       <section class="screen vault-screen">
@@ -2725,4 +2917,5 @@ async function boot() {
 }
 
 armEditorSelectionTools();
+setInterval(checkAlarms, 1000);
 boot();

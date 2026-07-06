@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
@@ -12,8 +12,15 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
+    <div id="smartmemoSplash" class="smartmemo-splash" aria-hidden="true">
+      <div class="splash-paper"></div>
+      <div class="splash-logo-wrap">
+        <img src="./assets/smartmemo-logo-256.png" alt="" />
+        <i></i><i></i><i></i><i></i>
+      </div>
+    </div>
     <main id="app" class="app-shell"></main>
-    <input id="imagePicker" class="hidden-input" type="file" accept="image/*" capture="environment" multiple />
+    <input id="imagePicker" class="hidden-input" type="file" accept="image/*" multiple />
     <input id="backupPicker" class="hidden-input" type="file" accept=".smemo,application/octet-stream" />
     <script src="./app.js"></script>
   </body>
