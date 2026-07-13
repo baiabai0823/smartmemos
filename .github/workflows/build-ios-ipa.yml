@@ -59,7 +59,7 @@ jobs:
         run: |
           cd release/SmartMemo-iOS/ios/App
           xcodebuild \
-            -project App.xcodeproj \
+            -workspace App.xcworkspace \
             -scheme App \
             -configuration Release \
             -destination "generic/platform=iOS" \
