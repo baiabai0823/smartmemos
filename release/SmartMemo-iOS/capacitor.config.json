@@ -1,0 +1,12 @@
+{
+  "appId": "com.baiabai.smartmemo",
+  "appName": "SmartMemo",
+  "webDir": "www",
+  "server": {
+    "iosScheme": "capacitor"
+  },
+  "ios": {
+    "contentInset": "automatic",
+    "preferredContentMode": "mobile"
+  }
+}
