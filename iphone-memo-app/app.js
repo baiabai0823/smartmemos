@@ -9,6 +9,9 @@ const $ = (selector) => document.querySelector(selector);
 const app = $("#app");
 const imagePicker = $("#imagePicker");
 const backupPicker = $("#backupPicker");
+const IS_NATIVE_IOS = window.Capacitor?.getPlatform?.() === "ios";
+
+document.documentElement.classList.toggle("ios-native", IS_NATIVE_IOS);
 
 let state = {
   folders: [],
@@ -677,7 +680,7 @@ function renderHome() {
         `PROPRIETARY NODE ${allCount} MEMOS`,
         `
           <button class="icon-btn ghost" data-action="theme" title="Theme">${state.settings.theme === "light" ? icon.sun : icon.moon}</button>
-          <button class="icon-btn" data-action="settings" title="璁剧疆">${icon.gear}</button>
+          <button class="icon-btn" data-action="settings" title="Settings">${icon.gear}</button>
         `
       )}
       <label class="searchbar compact">
@@ -778,11 +781,11 @@ function toolSvg(type) {
 function renderDock(active = "vault") {
   return `
     <nav class="dock">
-      <button class="dock-item ${active === "vault" ? "active" : ""}" data-action="dock-vault" title="鍏ㄩ儴">
+      <button class="dock-item ${active === "vault" ? "active" : ""}" data-action="dock-vault" title="Vault">
         <span>${icon.vaultGlyph}</span>
         <strong>VAULT</strong>
       </button>
-      <button class="dock-add" data-action="create-menu" title="娣诲姞 Memo">${icon.plus}</button>
+      <button class="dock-add" data-action="create-menu" title="Add Memo">${icon.plus}</button>
       <button class="dock-item ${active === "history" ? "active" : ""}" data-action="dock-history" title="History">
         <span>${icon.historyGlyph}</span>
         <strong>HISTORY</strong>
@@ -797,8 +800,8 @@ function renderHistory() {
     <section class="screen vault-screen">
       ${renderStatus(
         "HISTORY",
-        `${entries.length} 鏉″凡鍒犻櫎 / 杩囨湡 memos`,
-        `<button class="icon-btn" data-action="settings" title="璁剧疆">${icon.gear}</button>`
+        `${entries.length} Deleted / Expired Memos`,
+        `<button class="icon-btn" data-action="settings" title="Settings">${icon.gear}</button>`
       )}
       <div class="scroll">
         <div class="note-list history-list">
@@ -977,9 +980,9 @@ function renderImageTray(note) {
   return `
     <div class="image-tray compact-tray">
       ${images.map((src, index) => `
-        <button class="thumb-tile" data-action="preview-tray-image" data-id="${index}" title="鏌ョ湅鍥剧墖">
+        <button class="thumb-tile" data-action="preview-tray-image" data-id="${index}" title="View Image">
           <img src="${src}" alt="memo image ${index + 1}" />
-          <span data-action="remove-tray-image" data-id="${index}" title="鍒犻櫎鍥剧墖">脳</span>
+          <span data-action="remove-tray-image" data-id="${index}" title="Delete Image">${icon.close}</span>
         </button>
       `).join("")}
     </div>
@@ -1003,9 +1006,9 @@ function renderImageManager(note) {
                 <span>鍙瑙堛€佸垹闄ゃ€佽皟鏁翠綅缃?/span>
               </div>
               <div class="icon-row">
-                <button class="icon-btn" data-action="move-image-up" data-id="${id}" title="涓婄Щ">${icon.moveUp}</button>
-                <button class="icon-btn" data-action="move-image-down" data-id="${id}" title="涓嬬Щ">${icon.moveDown}</button>
-                <button class="icon-btn" data-action="remove-image" data-id="${id}" title="鍒犻櫎">脳</button>
+                <button class="icon-btn" data-action="move-image-up" data-id="${id}" title="Move Up">${icon.moveUp}</button>
+                <button class="icon-btn" data-action="move-image-down" data-id="${id}" title="Move Down">${icon.moveDown}</button>
+                <button class="icon-btn" data-action="remove-image" data-id="${id}" title="Delete">${icon.close}</button>
               </div>
             </div>
           `;
@@ -2118,7 +2121,29 @@ function nativeSaveBackup(fileName, backupText) {
   if (!result?.ok) throw new Error(result?.message || "Android Save Failed");
   return result;
 }
+async function iosSaveBackup(fileName, backupText) {
+  if (!IS_NATIVE_IOS) return null;
+  const filesystem = window.Capacitor?.Plugins?.Filesystem;
+  const share = window.Capacitor?.Plugins?.Share;
+  if (!filesystem?.writeFile || !share?.share) throw new Error("IOS_EXPORT_UNAVAILABLE");
 
+  const saved = await filesystem.writeFile({
+    path: fileName,
+    data: utf8ToBase64(backupText),
+    directory: "DOCUMENTS",
+    recursive: true
+  });
+  if (!saved?.uri) throw new Error("IOS_EXPORT_WRITE_FAILED");
+
+  await share.share({
+    title: "SmartMemo Backup",
+    text: "Encrypted SmartMemo Backup",
+    files: [saved.uri],
+    dialogTitle: "Save SmartMemo Backup"
+  });
+
+  return { ok: true, path: `On My iPhone/SmartMemo/${fileName}` };
+}
 async function exportBackup(options = {}) {
   try {
     const { payloadState, payloadPasswords } = buildBackupPayload(options);
@@ -2132,13 +2157,13 @@ async function exportBackup(options = {}) {
     const backupText = JSON.stringify(encrypted);
     const verified = await decryptPayload(JSON.parse(backupText));
     const counts = backupCounts(verified.state);
-    const nativeResult = nativeSaveBackup(fileName, backupText);
+    const nativeResult = nativeSaveBackup(fileName, backupText) || await iosSaveBackup(fileName, backupText);
     if (nativeResult) {
       ui.modal = {
         type: "result",
         status: "success",
         title: "Mobile Export Complete",
-        message: `Backup Verified ? ${counts.folders} Folders ? ${counts.memos} Memos ? ${counts.history} History Items`,
+        message: `Backup Verified | ${counts.folders} Folders | ${counts.memos} Memos | ${counts.history} History Items`,
         path: nativeResult.path || `Downloads/SmartMemo/${fileName}`
       };
     } else {
@@ -2153,7 +2178,7 @@ async function exportBackup(options = {}) {
         type: "result",
         status: "success",
         title: "Export Started",
-        message: `Backup Verified ? ${counts.folders} Folders ? ${counts.memos} Memos ? ${counts.history} History Items`,
+        message: `Backup Verified | ${counts.folders} Folders | ${counts.memos} Memos | ${counts.history} History Items`,
         path: downloadFolderHint()
       };
     }

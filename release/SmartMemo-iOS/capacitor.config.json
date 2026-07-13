@@ -6,7 +6,7 @@
     "iosScheme": "capacitor"
   },
   "ios": {
-    "contentInset": "automatic",
+    "contentInset": "never",
     "preferredContentMode": "mobile"
   }
 }

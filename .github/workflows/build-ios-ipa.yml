@@ -43,7 +43,9 @@ jobs:
 
       - name: Create native iOS project
         working-directory: release/SmartMemo-iOS
-        run: npx cap add ios
+        run: |
+          npx cap add ios
+          npx cap sync ios
 
       - name: Configure iPhone application
         shell: bash
@@ -53,6 +55,10 @@ jobs:
           /usr/libexec/PlistBuddy -c "Add :ITSAppUsesNonExemptEncryption bool false" "$PLIST" || \
             /usr/libexec/PlistBuddy -c "Set :ITSAppUsesNonExemptEncryption false" "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :NSPhotoLibraryUsageDescription string SmartMemo uses selected photos only when you insert them into a memo." "$PLIST" || true
+          /usr/libexec/PlistBuddy -c "Add :UIFileSharingEnabled bool true" "$PLIST" || \
+            /usr/libexec/PlistBuddy -c "Set :UIFileSharingEnabled true" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :LSSupportsOpeningDocumentsInPlace bool true" "$PLIST" || \
+            /usr/libexec/PlistBuddy -c "Set :LSSupportsOpeningDocumentsInPlace true" "$PLIST"
 
       - name: Build unsigned archive
         shell: bash
