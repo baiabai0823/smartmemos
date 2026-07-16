@@ -1,13 +1,16 @@
 package com.smartmemo.app;
 
+import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.AlarmManager;
+import android.app.AlertDialog;
 import android.app.PendingIntent;
 import android.app.Activity;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.ContentValues;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -15,9 +18,9 @@ import android.os.Environment;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.provider.MediaStore;
+import android.provider.Settings;
 import android.util.Base64;
 import android.view.View;
-import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -29,23 +32,70 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 
 public class MainActivity extends Activity {
     private static final int FILE_CHOOSER_REQUEST = 4201;
-    private static final String ACTION_ALARM = "com.smartmemo.app.ALARM_TRIGGERED";
-    private static final String EXTRA_ALARM_ID = "alarm_id";
-    private static final String EXTRA_ALARM_TITLE = "alarm_title";
-    private static final String EXTRA_ALARM_FIRE_AT = "alarm_fire_at";
+    private static final String REMINDER_PERMISSION_GUIDE = "reminder_permission_guide_v1";
+    public static final String ACTION_REMINDER_OPEN = "com.smartmemo.app.REMINDER_OPEN";
+    private static final String ACTION_TEST_REMINDER = "com.smartmemo.app.TEST_REMINDER";
+    private static final long MINUTE = 60_000L;
+    private static final long HOUR = 60L * MINUTE;
+    private static final long DAY = 24L * HOUR;
+
+    private static final class ReminderStage {
+        final String code;
+        final long offset;
+        final String remaining;
+        final String content;
+        final String level;
+
+        ReminderStage(String code, long offset, String remaining, String content, String level) {
+            this.code = code;
+            this.offset = offset;
+            this.remaining = remaining;
+            this.content = content;
+            this.level = level;
+        }
+    }
+
+    private static final ReminderStage[] REMINDER_STAGES = new ReminderStage[]{
+        new ReminderStage("d90", 90 * DAY, "90 天", "事项进入倒计时周期，可按计划稳步推进", "normal"),
+        new ReminderStage("d80", 80 * DAY, "80 天", "倒计时已更新，持续关注进度即可", "normal"),
+        new ReminderStage("d70", 70 * DAY, "70 天", "保持当前推进节奏", "normal"),
+        new ReminderStage("d60", 60 * DAY, "60 天", "建议确认阶段性安排", "normal"),
+        new ReminderStage("d50", 50 * DAY, "50 天", "逐步进入准备阶段", "normal"),
+        new ReminderStage("d40", 40 * DAY, "40 天", "可以开始核心准备", "normal"),
+        new ReminderStage("d30", 30 * DAY, "30 天", "进入关键准备期", "normal"),
+        new ReminderStage("d20", 20 * DAY, "20 天", "事项临近，请留意", "normal"),
+        new ReminderStage("d10", 10 * DAY, "10 天", "建议确认最终安排", "normal"),
+        new ReminderStage("d5", 5 * DAY, "5 天", "建议启动最终准备", "normal"),
+        new ReminderStage("d3", 3 * DAY, "3 天", "请确认事项细节", "normal"),
+        new ReminderStage("d1", DAY, "1 天", "明天截止，请完成最终核对", "near"),
+        new ReminderStage("h12", 12 * HOUR, "12 小时", "事项即将到期，请合理安排时间", "near"),
+        new ReminderStage("h8", 8 * HOUR, "8 小时", "请预留充足处理时间", "near"),
+        new ReminderStage("h4", 4 * HOUR, "4 小时", "进入最后倒计时", "near"),
+        new ReminderStage("h2", 2 * HOUR, "2 小时", "请尽快完成事项", "near"),
+        new ReminderStage("h1", HOUR, "1 小时", "进入最终准备阶段", "near"),
+        new ReminderStage("m30", 30 * MINUTE, "30 分钟", "请做好最后确认", "urgent"),
+        new ReminderStage("m10", 10 * MINUTE, "10 分钟", "请立即处理", "urgent"),
+        new ReminderStage("m3", 3 * MINUTE, "3 分钟", "请勿错过截止时间", "urgent"),
+        new ReminderStage("deadline", 0L, "已到期", "事项正式截止，请及时完成处理", "urgent")
+    };
     private WebView webView;
     private ValueCallback<Uri[]> filePathCallback;
     private Vibrator vibrator;
     private boolean pageReady = false;
-    private Intent pendingAlarmIntent;
+    private String pendingCompleteReminderId;
+    private String pendingOpenReminderId;
 
     @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        requestNotificationPermission();
         webView = new WebView(this);
         vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
         setContentView(webView);
@@ -67,7 +117,7 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 pageReady = true;
-                dispatchPendingAlarm();
+                dispatchPendingReminderAction();
             }
         });
         webView.setWebChromeClient(new WebChromeClient() {
@@ -98,14 +148,14 @@ public class MainActivity extends Activity {
         });
         webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
         webView.loadUrl("file:///android_asset/www/index.html");
-        handleAlarmIntent(getIntent());
+        handleReminderIntent(getIntent());
     }
 
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        handleAlarmIntent(intent);
+        handleReminderIntent(intent);
     }
 
     @Override
@@ -139,62 +189,229 @@ public class MainActivity extends Activity {
     }
 
 
-    private void handleAlarmIntent(Intent intent) {
-        if (intent == null || !ACTION_ALARM.equals(intent.getAction())) return;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            setShowWhenLocked(true);
-            setTurnScreenOn(true);
+
+    private void requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 823);
         }
-        getWindow().addFlags(
-            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
-            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
-            WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
-            WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
-        );
-        pendingAlarmIntent = intent;
-        dispatchPendingAlarm();
+    }
+    private void handleReminderIntent(Intent intent) {
+        if (intent == null) return;
+        if ((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0 && ACTION_TEST_REMINDER.equals(intent.getAction())) {
+            Intent testReminder = new Intent(this, AlarmReceiver.class);
+            testReminder.setAction(AlarmReceiver.ACTION_REMINDER);
+            if (intent.getExtras() != null) testReminder.putExtras(intent.getExtras());
+            long delayMs = intent.getLongExtra("test_delay_ms", 0L);
+            if (delayMs > 0L) {
+                int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) flags |= PendingIntent.FLAG_IMMUTABLE;
+                PendingIntent operation = PendingIntent.getBroadcast(this, 98023, testReminder, flags);
+                AlarmManager manager = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
+                if (manager != null) scheduleReminder(manager, System.currentTimeMillis() + delayMs, operation);
+            } else {
+                sendBroadcast(testReminder);
+            }
+            return;
+        }
+        if (AlarmReceiver.ACTION_COMPLETE.equals(intent.getAction())) {
+            pendingCompleteReminderId = intent.getStringExtra(AlarmReceiver.EXTRA_REMINDER_ID);
+            recordNativeEvent("reminder.complete.requested", pendingCompleteReminderId);
+            dispatchPendingReminderAction();
+        } else if (ACTION_REMINDER_OPEN.equals(intent.getAction())) {
+            pendingOpenReminderId = intent.getStringExtra(AlarmReceiver.EXTRA_REMINDER_ID);
+            recordNativeEvent("reminder.open.requested", pendingOpenReminderId);
+            dispatchPendingReminderAction();
+        }
     }
 
-    private void dispatchPendingAlarm() {
-        if (!pageReady || webView == null || pendingAlarmIntent == null) return;
-        String id = pendingAlarmIntent.getStringExtra(EXTRA_ALARM_ID);
-        String title = pendingAlarmIntent.getStringExtra(EXTRA_ALARM_TITLE);
-        long fireAt = pendingAlarmIntent.getLongExtra(EXTRA_ALARM_FIRE_AT, System.currentTimeMillis());
-        pendingAlarmIntent = null;
-        String js = "window.smartMemoNativeAlarm && window.smartMemoNativeAlarm(\"" + escapeJs(id) + "\",\"" + escapeJs(title) + "\"," + fireAt + ")";
-        webView.post(() -> webView.evaluateJavascript(js, null));
+    private void dispatchPendingReminderAction() {
+        if (!pageReady || webView == null) return;
+        if (pendingCompleteReminderId != null) {
+            String id = pendingCompleteReminderId;
+            pendingCompleteReminderId = null;
+            String js = "window.smartMemoNativeCompleteReminder && window.smartMemoNativeCompleteReminder(\"" + escapeJs(id) + "\")";
+            webView.post(() -> webView.evaluateJavascript(js, null));
+        }
+        if (pendingOpenReminderId != null) {
+            String id = pendingOpenReminderId;
+            pendingOpenReminderId = null;
+            String js = "window.smartMemoNativeOpenReminder && window.smartMemoNativeOpenReminder(\"" + escapeJs(id) + "\")";
+            webView.post(() -> webView.evaluateJavascript(js, null));
+        }
     }
 
-    private PendingIntent alarmPendingIntent(String id, long fireAt, String title) {
-        Intent intent = new Intent(this, MainActivity.class);
-        intent.setAction(ACTION_ALARM);
-        intent.putExtra(EXTRA_ALARM_ID, id);
-        intent.putExtra(EXTRA_ALARM_TITLE, title == null ? "Memo Reminder" : title);
-        intent.putExtra(EXTRA_ALARM_FIRE_AT, fireAt);
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+    private PendingIntent reminderPendingIntent(String id, long deadline, String title, String remark, ReminderStage stage) {
+        Intent intent = new Intent(this, AlarmReceiver.class);
+        intent.setAction(AlarmReceiver.ACTION_REMINDER);
+        intent.putExtra(AlarmReceiver.EXTRA_REMINDER_ID, id);
+        intent.putExtra(AlarmReceiver.EXTRA_TITLE, title == null ? "Memo Reminder" : title);
+        intent.putExtra(AlarmReceiver.EXTRA_REMARK, remark == null ? "" : remark);
+        intent.putExtra(AlarmReceiver.EXTRA_DEADLINE, deadline);
+        intent.putExtra(AlarmReceiver.EXTRA_STAGE, stage.code);
+        intent.putExtra(AlarmReceiver.EXTRA_REMAINING, stage.remaining);
+        intent.putExtra(AlarmReceiver.EXTRA_CONTENT, stage.content);
+        intent.putExtra(AlarmReceiver.EXTRA_LEVEL, stage.level);
         int flags = PendingIntent.FLAG_UPDATE_CURRENT;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) flags |= PendingIntent.FLAG_IMMUTABLE;
-        return PendingIntent.getActivity(this, id == null ? 0 : id.hashCode(), intent, flags);
+        return PendingIntent.getBroadcast(this, AlarmReceiver.requestCode(id, stage.code), intent, flags);
+    }
+
+    private void scheduleReminder(AlarmManager manager, long triggerAt, PendingIntent operation) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || manager.canScheduleExactAlarms()) {
+                manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, operation);
+            } else {
+                manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, operation);
+            }
+        } else {
+            manager.setExact(AlarmManager.RTC_WAKEUP, triggerAt, operation);
+        }
+    }
+
+    private void cancelReminderSeries(String id) {
+        if (id == null || id.trim().isEmpty()) return;
+        AlarmManager manager = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
+        android.app.NotificationManager notifications = (android.app.NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        for (ReminderStage stage : REMINDER_STAGES) {
+            if (manager != null) manager.cancel(reminderPendingIntent(id, 0L, "", "", stage));
+            if (notifications != null) notifications.cancel(AlarmReceiver.requestCode(id, stage.code));
+        }
+    }
+
+    public static String formatDeadline(long deadline) {
+        return new SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(new Date(deadline));
+    }
+
+    private void recordNativeEvent(String event, String detail) {
+        try {
+            android.content.SharedPreferences prefs = getSharedPreferences("smartmemo_diagnostics", Context.MODE_PRIVATE);
+            String current = prefs.getString("events", "[]");
+            String item = "{\"at\":" + System.currentTimeMillis() + ",\"event\":\"" + escapeJson(event) + "\",\"detail\":\"" + escapeJson(detail) + "\"}";
+            String next = current.length() <= 2 ? "[" + item + "]" : current.substring(0, current.length() - 1) + "," + item + "]";
+            if (next.length() > 24000) next = "[" + next.substring(Math.max(1, next.length() - 22000));
+            prefs.edit().putString("events", next).apply();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private boolean canScheduleExactAlarmNow() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            AlarmManager alarmManager = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
+            return alarmManager != null && alarmManager.canScheduleExactAlarms();
+        }
+        return true;
+    }
+
+    private boolean notificationsAllowedNow() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            return checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
+        }
+        return true;
+    }
+
+    private boolean batteryOptimizationsIgnoredNow() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            android.os.PowerManager powerManager = (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
+            return powerManager != null && powerManager.isIgnoringBatteryOptimizations(getPackageName());
+        }
+        return true;
+    }
+
+    private void showReminderPermissionGuideOnce() {
+        android.content.SharedPreferences prefs = getSharedPreferences("smartmemo_settings", Context.MODE_PRIVATE);
+        if (prefs.getBoolean(REMINDER_PERMISSION_GUIDE, false)) return;
+        prefs.edit().putBoolean(REMINDER_PERMISSION_GUIDE, true).apply();
+        runOnUiThread(() -> new AlertDialog.Builder(this)
+            .setTitle("让提醒准时到达")
+            .setMessage("请允许通知、精确闹钟和自启动，并将电池策略设为无限制。\n\nSmartMemo 只使用这些权限发送本地提醒。")
+            .setPositiveButton("检查权限", (dialog, which) -> openReminderPermissionSettings())
+            .setNegativeButton("稍后", null)
+            .show());
+    }
+
+    private void openReminderPermissionSettings() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !notificationsAllowedNow()) {
+                requestNotificationPermission();
+                return;
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !canScheduleExactAlarmNow()) {
+                startActivity(new Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, Uri.parse("package:" + getPackageName())));
+                return;
+            }
+            if ("Xiaomi".equalsIgnoreCase(Build.MANUFACTURER)) {
+                Intent intent = new Intent();
+                intent.setClassName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity");
+                startActivity(intent);
+                return;
+            }
+            startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+        } catch (Exception error) {
+            startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName())));
+        }
     }
     private class AndroidBridge {
         @JavascriptInterface
-        public boolean scheduleAlarm(String id, long fireAt, String title) {
+        public boolean scheduleAlarm(String id, long fireAt, String title, String remark) {
             if (id == null || id.trim().isEmpty() || fireAt <= 0) return false;
-            AlarmManager alarmManager = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
-            if (alarmManager == null) return false;
-            PendingIntent operation = alarmPendingIntent(id, fireAt, title);
-            AlarmManager.AlarmClockInfo alarmInfo = new AlarmManager.AlarmClockInfo(fireAt, operation);
-            alarmManager.setAlarmClock(alarmInfo, operation);
-            return true;
+            showReminderPermissionGuideOnce();
+            try {
+                AlarmManager alarmManager = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
+                if (alarmManager == null) {
+                    recordNativeEvent("reminder.schedule.failed", "AlarmManager unavailable");
+                    return false;
+                }
+
+                cancelReminderSeries(id);
+                long now = System.currentTimeMillis();
+                int scheduled = 0;
+                String safeRemark = remark == null ? "" : remark.trim();
+                if (safeRemark.length() > 240) safeRemark = safeRemark.substring(0, 240) + "...";
+
+                for (ReminderStage stage : REMINDER_STAGES) {
+                    long triggerAt = fireAt - stage.offset;
+                    if (triggerAt <= now + 1000L) continue;
+                    PendingIntent operation = reminderPendingIntent(id, fireAt, title, safeRemark, stage);
+                    scheduleReminder(alarmManager, triggerAt, operation);
+                    scheduled++;
+                }
+
+                recordNativeEvent("reminder.series.schedule", id + "@" + fireAt + "|nodes=" + scheduled
+                    + "|exact=" + canScheduleExactAlarmNow() + "|notifications=" + notificationsAllowedNow());
+                return scheduled > 0;
+            } catch (Exception error) {
+                recordNativeEvent("reminder.schedule.failed", error.getClass().getSimpleName() + ":" + error.getMessage());
+                return false;
+            }
         }
 
         @JavascriptInterface
         public void cancelAlarm(String id) {
-            if (id == null || id.trim().isEmpty()) return;
-            AlarmManager alarmManager = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
-            if (alarmManager == null) return;
-            alarmManager.cancel(alarmPendingIntent(id, 0, ""));
+            cancelReminderSeries(id);
+            recordNativeEvent("reminder.series.cancel", id);
         }
+
+        @JavascriptInterface
+        public void clearAlarmAlert(String id) {
+            cancelReminderSeries(id);
+            recordNativeEvent("reminder.notifications.clear", id);
+        }
+
+        @JavascriptInterface
+        public String getDiagnostics() {
+            android.content.SharedPreferences prefs = getSharedPreferences("smartmemo_diagnostics", Context.MODE_PRIVATE);
+            String events = prefs.getString("events", "[]");
+            return "{"
+                + "\"sdk\":" + Build.VERSION.SDK_INT + ","
+                + "\"canScheduleExactAlarm\":" + canScheduleExactAlarmNow() + ","
+                + "\"notificationsAllowed\":" + notificationsAllowedNow() + ","
+                + "\"batteryOptimizationsIgnored\":" + batteryOptimizationsIgnoredNow() + ","
+                + "\"fullScreenIntentAllowed\":false,"
+                + "\"package\":\"" + escapeJson(getPackageName()) + "\","
+                + "\"nativeEvents\":" + events
+                + "}";
+        }
+
 
         @JavascriptInterface
         public void startVibration() {
@@ -241,7 +458,7 @@ public class MainActivity extends Activity {
 
     private String sanitizeFileName(String fileName) {
         String safe = fileName == null ? "SmartMemo-backup.smemo" : fileName.replaceAll("[^A-Za-z0-9._-]", "_");
-        return safe.endsWith(".smemo") ? safe : safe + ".smemo";
+        return (safe.endsWith(".smemo") || safe.endsWith(".json")) ? safe : safe + ".smemo";
     }
 
     private String writeBackup(String fileName, byte[] bytes) throws IOException {

@@ -3,6 +3,7 @@ const LEGACY_PASSWORD_KEY = "smartmemo.passwords.plain.v1";
 const APP_SECRET = "SmartMemo-iPhone-local-app-key-v1";
 const BACKUP_FORMAT = "smartmemo.encrypted.backup.v1";
 const MASTER_PASSWORD = "bab2001823";
+const DIAGNOSTIC_LOG_KEY = "smartmemo.diagnostics.v1";
 
 const $ = (selector) => document.querySelector(selector);
 const app = $("#app");
@@ -57,17 +58,16 @@ let ui = {
   unlockedFolders: new Set(),
   unlockedNotes: new Set(),
   modal: null,
-  alarm: null,
   saveTimer: null,
   wheelDraft: null,
   longPressFolderId: null,
   silentTimer: null,
-  alarmVibrateTimer: null,
   revealedPasswords: new Set(),
   recoveryOpen: new Set(),
   pendingImport: null,
+  backupPickerMode: "import",
+  toast: null,
   lastSelection: null,
-  pendingNativeAlarms: [],
   pendingDrag: null,
   drag: null,
   dragScrollFrame: null,
@@ -241,8 +241,8 @@ function seedData() {
   const inbox = uid("folder");
   const privateFolder = uid("folder");
   state.folders = [
-    { id: inbox, name: "收纳备忘", hasPassword: false, createdAt: nowIso(), updatedAt: nowIso() },
-    { id: privateFolder, name: "私密文件夹", hasPassword: true, createdAt: nowIso(), updatedAt: nowIso() }
+    { id: inbox, name: "Inbox", hasPassword: false, createdAt: nowIso(), updatedAt: nowIso() },
+    { id: privateFolder, name: "Private Space", hasPassword: true, createdAt: nowIso(), updatedAt: nowIso() }
   ];
   plainPasswords.folders[privateFolder] = "1234";
   state.history = [];
@@ -250,8 +250,8 @@ function seedData() {
     {
       id: uid("note"),
       folderId: null,
-      title: "快速记录",
-      bodyHtml: "双击标题或正文即可编辑。图片、提醒和密码都在底部工具栏。",
+      title: "Quick Memo",
+      bodyHtml: "Tap The Title Or Body To Edit. Images, Reminder, And Lock Are In The Bottom Toolbar.",
       favorite: false,
       category: "default",
       hasPassword: false,
@@ -263,8 +263,8 @@ function seedData() {
     {
       id: uid("note"),
       folderId: inbox,
-      title: "会议纪要",
-      bodyHtml: "1. 整理产品需求<br>2. 标记需要提醒的事项<br>3. 导出加密备份",
+      title: "Meeting Notes",
+      bodyHtml: "1. Organize Product Needs<br>2. Mark Reminder Items<br>3. Export Encrypted Backup",
       favorite: false,
       category: "default",
       hasPassword: false,
@@ -289,7 +289,6 @@ function seedData() {
   ];
   plainPasswords.notes[state.notes[2].id] = "0000";
 }
-
 function normalizeState() {
   state.folders = Array.isArray(state.folders) ? state.folders : [];
   state.notes = Array.isArray(state.notes) ? state.notes : [];
@@ -346,6 +345,156 @@ async function saveNow() {
   localStorage.removeItem(LEGACY_PASSWORD_KEY);
 }
 
+function safeErrorSummary(error) {
+  if (!error) return "";
+  return String(error?.message || error).slice(0, 240);
+}
+
+function readDiagnosticLog() {
+  try {
+    const items = JSON.parse(localStorage.getItem(DIAGNOSTIC_LOG_KEY) || "[]");
+    return Array.isArray(items) ? items : [];
+  } catch {
+    return [];
+  }
+}
+
+function addDiagnosticLog(event, detail = {}) {
+  const clean = {};
+  Object.entries(detail || {}).forEach(([key, value]) => {
+    if (/password|body|content|memoText/i.test(key)) return;
+    clean[key] = typeof value === "string" ? value.slice(0, 240) : value;
+  });
+  const items = readDiagnosticLog();
+  items.push({ at: nowIso(), event, detail: clean });
+  localStorage.setItem(DIAGNOSTIC_LOG_KEY, JSON.stringify(items.slice(-240)));
+}
+
+function nativeDiagnostics() {
+  if (!window.SmartMemoAndroid?.getDiagnostics) return null;
+  try {
+    return JSON.parse(window.SmartMemoAndroid.getDiagnostics() || "{}");
+  } catch (error) {
+    return { error: safeErrorSummary(error) };
+  }
+}
+
+function latestDiagnosticEvent(names) {
+  const wanted = new Set(names);
+  const logs = readDiagnosticLog();
+  const native = nativeDiagnostics();
+  const nativeEvents = Array.isArray(native?.nativeEvents) ? native.nativeEvents : [];
+  const merged = [
+    ...logs.map((item) => ({ at: item.at, event: item.event, detail: item.detail || {} })),
+    ...nativeEvents.map((item) => ({ at: item.at ? new Date(item.at).toISOString() : "", event: item.event, detail: item.detail || "" }))
+  ];
+  return [...merged].reverse().find((item) => wanted.has(item.event)) || null;
+}
+
+function formatDiagnosticTime(value) {
+  if (!value) return "Not Recorded";
+  const parsed = Number(value);
+  if (Number.isFinite(parsed) && parsed > 0) return fmtTime(parsed);
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Not Recorded" : fmtTime(date.toISOString());
+}
+
+function reminderHealthSnapshot() {
+  const native = nativeDiagnostics() || {};
+  const hasNative = Boolean(native && !native.error);
+  const scheduled = latestDiagnosticEvent(["alarm.native.schedule", "alarm.schedule"]);
+  const triggered = latestDiagnosticEvent(["alarm.ui.trigger", "alarm.receiver.trigger", "alarm.web.dispatch", "alarm.activity.received"]);
+  const scheduledFireAt = scheduled?.detail?.fireAt || String(scheduled?.detail || "").match(/@(\d+)/)?.[1];
+  const triggeredFireAt = triggered?.detail?.fireAt || String(triggered?.detail || "").match(/@(\d+)/)?.[1] || triggered?.at;
+  return {
+    notificationAllowed: hasNative && typeof native.notificationsAllowed === "boolean" ? native.notificationsAllowed : null,
+    exactAlarmAllowed: hasNative && typeof native.canScheduleExactAlarm === "boolean" ? native.canScheduleExactAlarm : null,
+    batteryUnrestricted: hasNative && typeof native.batteryOptimizationsIgnored === "boolean" ? native.batteryOptimizationsIgnored : null,
+    fullScreenAlertAvailable: hasNative && typeof native.fullScreenIntentAllowed === "boolean" ? native.fullScreenIntentAllowed : null,
+    lastScheduledTime: formatDiagnosticTime(scheduledFireAt),
+    lastTriggeredTime: formatDiagnosticTime(triggeredFireAt)
+  };
+}
+
+function healthRow(label, ok, value = null) {
+  const isKnown = typeof ok === "boolean";
+  const className = isKnown ? (ok ? "ok" : "warn") : "neutral";
+  const text = value || (isKnown ? (ok ? "Allowed" : "Needs Check") : "Unknown");
+  return `<div class="health-row ${className}"><span>${label}</span><strong>${text}</strong></div>`;
+}
+
+function renderReminderHealthCard() {
+  const health = reminderHealthSnapshot();
+  const checks = [health.notificationAllowed, health.exactAlarmAllowed, health.batteryUnrestricted, health.fullScreenAlertAvailable];
+  const known = checks.filter((item) => typeof item === "boolean");
+  const ready = known.filter(Boolean).length;
+  const summary = known.length ? `${ready}/${known.length} Ready` : "Phone Check";
+  return `
+    <div class="settings-card compact-health-card">
+      <div class="settings-inline-head">
+        <div>
+          <h3>Reminder Health</h3>
+          <p class="muted">${summary} ? Last Triggered ${health.lastTriggeredTime}</p>
+        </div>
+        <button class="small-btn" data-action="reminder-health">Details</button>
+      </div>
+      <div class="health-strip">
+        ${healthRow("Notify", health.notificationAllowed)}
+        ${healthRow("Exact", health.exactAlarmAllowed)}
+        ${healthRow("Battery", health.batteryUnrestricted)}
+        ${healthRow("Full", health.fullScreenAlertAvailable)}
+      </div>
+    </div>
+  `;
+}
+
+
+function showToast(message) {
+  ui.toast = { message };
+  renderToast();
+  clearTimeout(ui.toastTimer);
+  ui.toastTimer = setTimeout(() => {
+    ui.toast = null;
+    renderToast();
+  }, 1800);
+}
+
+function renderToast() {
+  document.querySelector(".smart-toast")?.remove();
+  if (!ui.toast?.message) return;
+  app.insertAdjacentHTML("beforeend", `<div class="smart-toast">${escapeHtml(ui.toast.message)}</div>`);
+}
+
+function exportDiagnosticLog() {
+  const payload = {
+    exportedAt: nowIso(),
+    app: "SmartMemo",
+    userAgent: navigator.userAgent,
+    native: nativeDiagnostics(),
+    logs: readDiagnosticLog()
+  };
+  const text = JSON.stringify(payload, null, 2);
+  const fileName = `SmartMemo-diagnostics-${Date.now()}.json`;
+  try {
+    const nativeResult = nativeSaveBackup(fileName, text);
+    if (nativeResult) {
+      ui.modal = { type: "result", status: "success", title: "Diagnostics Exported", message: "Diagnostic Log Saved On This Phone.", path: nativeResult.path };
+      render();
+      return;
+    }
+  } catch (error) {
+    addDiagnosticLog("diagnostics.export.failed", { error: safeErrorSummary(error) });
+  }
+  const blob = new Blob([text], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  URL.revokeObjectURL(url);
+  ui.modal = { type: "result", status: "success", title: "Diagnostics Exported", message: "Diagnostic Log Download Started." };
+  render();
+}
 function scheduleSave() {
   clearTimeout(ui.saveTimer);
   ui.saveTimer = setTimeout(async () => {
@@ -380,6 +529,23 @@ function setView(view, patch = {}) {
 
 function currentFolder() {
   return state.folders.find((folder) => folder.id === ui.folderId) || null;
+}
+
+function folderBreadcrumb(folderId) {
+  const path = [];
+  let current = state.folders.find((folder) => folder.id === folderId);
+  const seen = new Set();
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    path.unshift(current);
+    current = current.parentId ? state.folders.find((folder) => folder.id === current.parentId) : null;
+  }
+  return [{ id: "root", name: "Vault" }, ...path];
+}
+
+function renderFolderBreadcrumb(folderId) {
+  const crumbs = folderBreadcrumb(folderId);
+  return `<nav class="folder-breadcrumb">${crumbs.map((crumb, index) => `<button data-action="breadcrumb-folder" data-id="${crumb.id}">${escapeHtml(crumb.name)}</button>${index < crumbs.length - 1 ? `<span>/</span>` : ""}`).join("")}</nav>`;
 }
 
 function currentNote() {
@@ -452,7 +618,7 @@ function render() {
   else if (ui.view === "history") renderHistory();
   else renderHome();
   renderModal();
-  renderAlarm();
+  renderToast();
 }
 
 
@@ -504,10 +670,10 @@ function renderHome() {
     <section class="screen vault-screen">
       ${renderStatus(
         "VAULT",
-        `PROPRIETARY NODE · ${allCount} MEMOS`,
+        `PROPRIETARY NODE ${allCount} MEMOS`,
         `
           <button class="icon-btn ghost" data-action="theme" title="Theme">${state.settings.theme === "light" ? icon.sun : icon.moon}</button>
-          <button class="icon-btn" data-action="settings" title="设置">${icon.gear}</button>
+          <button class="icon-btn" data-action="settings" title="璁剧疆">${icon.gear}</button>
         `
       )}
       <label class="searchbar compact">
@@ -519,14 +685,14 @@ function renderHome() {
           <h2>MEMO FILES</h2>
         </div>
         <div class="folder-strip compact-folders">
-          ${folders.map(renderFolderCard).join("") || `<div class="empty-card">No Spaces</div>`}
+          ${folders.map(renderFolderCard).join("") || `<div class="empty-folder-state home-empty-state">No Spaces</div>`}
         </div>
         <div class="section-head quiet">
           <h2>ACTIVE MEMOS</h2>
-          <span>${rootNotes.length} 条</span>
+          <span class="active-count">${rootNotes.length} Memos</span>
         </div>
         <div class="note-list vault-root-notes">
-          ${rootNotes.map(renderNoteCard).join("") || `<div class="empty-card">Tap + To Create Memo</div>`}
+          ${rootNotes.map(renderNoteCard).join("") || `<div class="empty-folder-state home-empty-state">Tap + To Create Memo</div>`}
         </div>
       </div>
       ${renderDock("vault")}
@@ -567,7 +733,7 @@ function renderNoteCard(note) {
           <h3>${escapeHtml(note.title || "Untitled Memo")}</h3>
           <div class="icon-row">
             ${note.reminder ? `<span class="badge gold">${icon.bell}</span>` : ""}
-            ${note.hasPassword ? `<span class="badge" data-action="lock-note" data-id="${note.id}" title="Lock Memo">${icon.lock}</span>` : ""}
+            ${note.hasPassword ? `<span class="lock-corner" data-action="lock-note" data-id="${note.id}" title="Lock Memo">${icon.lock}</span>` : ""}
           </div>
         </div>
         <p class="excerpt">${escapeHtml(excerpt)}</p>
@@ -608,11 +774,11 @@ function toolSvg(type) {
 function renderDock(active = "vault") {
   return `
     <nav class="dock">
-      <button class="dock-item ${active === "vault" ? "active" : ""}" data-action="dock-vault" title="全部">
+      <button class="dock-item ${active === "vault" ? "active" : ""}" data-action="dock-vault" title="鍏ㄩ儴">
         <span>${icon.vaultGlyph}</span>
         <strong>VAULT</strong>
       </button>
-      <button class="dock-add" data-action="create-menu" title="添加 Memo">${icon.plus}</button>
+      <button class="dock-add" data-action="create-menu" title="娣诲姞 Memo">${icon.plus}</button>
       <button class="dock-item ${active === "history" ? "active" : ""}" data-action="dock-history" title="History">
         <span>${icon.historyGlyph}</span>
         <strong>HISTORY</strong>
@@ -627,8 +793,8 @@ function renderHistory() {
     <section class="screen vault-screen">
       ${renderStatus(
         "HISTORY",
-        `${entries.length} 条已删除 / 过期 memos`,
-        `<button class="icon-btn" data-action="settings" title="设置">${icon.gear}</button>`
+        `${entries.length} Deleted / Expired Memos`,
+        `<button class="icon-btn" data-action="settings" title="璁剧疆">${icon.gear}</button>`
       )}
       <div class="scroll">
         <div class="note-list history-list">
@@ -672,7 +838,18 @@ function renderFolder() {
   }
 
   const locked = folder.hasPassword && !ui.unlockedFolders.has(folder.id);
-  if (locked && !ui.modal) ui.modal = { type: "unlock", target: "folder", id: folder.id };
+  if (locked && !ui.modal) {
+    ui.modal = { type: "unlock", target: "folder", id: folder.id };
+    if (folder.parentId) {
+      ui.folderId = folder.parentId;
+      renderFolder();
+    } else {
+      ui.view = "home";
+      ui.folderId = null;
+      renderHome();
+    }
+    return;
+  }
   const notes = locked ? [] : filteredNotes(notesFor(folder.id));
   const folders = locked ? [] : childFolders(folder.id).filter((child) => !ui.search.trim() || fuzzyIncludes(`${child.name} ${notesFor(child.id).map((note) => `${note.title} ${textFromHtml(note.bodyHtml)}`).join(" ")}`, ui.search));
   app.innerHTML = `
@@ -685,6 +862,7 @@ function renderFolder() {
           ${locked ? "" : `<button class="icon-btn" data-action="edit-folder" data-id="${folder.id}" title="Folder Settings">${icon.gear}</button>`}
         `
       )}
+            ${renderFolderBreadcrumb(folder.id)}
       ${
         locked
           ? `<div class="lock-card lock-inline" data-action="unlock-folder" data-id="${folder.id}">
@@ -739,8 +917,10 @@ function renderEditor() {
                   <button class="icon-btn soft" data-action="${closeAction}" title="Close">${icon.close}</button>
                 </div>
               </header>
-              <input class="editor-title label-title" data-action="edit-title" maxlength="80" value="${escapeHtml(note.title)}" placeholder="LABEL CORE TITLE" />
-              <div class="editor-body stream-body" data-action="edit-body" contenteditable="true" data-placeholder="STREAM CAPTURE...">${sanitizeHtml(note.bodyHtml)}</div>
+              <div class="memo-scroll-content">
+                <input class="editor-title label-title" data-action="edit-title" maxlength="80" value="${escapeHtml(note.title)}" placeholder="LABEL CORE TITLE" />
+                <div class="editor-body stream-body" data-action="edit-body" contenteditable="true" data-placeholder="STREAM CAPTURE...">${sanitizeHtml(note.bodyHtml)}</div>
+              </div>
               <div class="format-popover" data-format-popover>
                 <button data-action="format-size" data-value="title">T</button>
                 <button data-action="format-cmd" data-cmd="bold"><b>B</b></button>
@@ -793,9 +973,9 @@ function renderImageTray(note) {
   return `
     <div class="image-tray compact-tray">
       ${images.map((src, index) => `
-        <button class="thumb-tile" data-action="preview-tray-image" data-id="${index}" title="查看图片">
+        <button class="thumb-tile" data-action="preview-tray-image" data-id="${index}" title="鏌ョ湅鍥剧墖">
           <img src="${src}" alt="memo image ${index + 1}" />
-          <span data-action="remove-tray-image" data-id="${index}" title="删除图片">×</span>
+          <span data-action="remove-tray-image" data-id="${index}" title="Delete Image">&times;</span>
         </button>
       `).join("")}
     </div>
@@ -815,13 +995,13 @@ function renderImageManager(note) {
             <div class="image-row">
               <img src="${src}" alt="memo image ${index + 1}" />
               <div>
-                <strong>图片 ${index + 1}</strong>
-                <span>可预览、删除、调整位置</span>
+                <strong>鍥剧墖 ${index + 1}</strong>
+                <span>Preview, Delete, Or Reorder</span>
               </div>
               <div class="icon-row">
-                <button class="icon-btn" data-action="move-image-up" data-id="${id}" title="上移">${icon.moveUp}</button>
-                <button class="icon-btn" data-action="move-image-down" data-id="${id}" title="下移">${icon.moveDown}</button>
-                <button class="icon-btn" data-action="remove-image" data-id="${id}" title="删除">×</button>
+                <button class="icon-btn" data-action="move-image-up" data-id="${id}" title="涓婄Щ">${icon.moveUp}</button>
+                <button class="icon-btn" data-action="move-image-down" data-id="${id}" title="涓嬬Щ">${icon.moveDown}</button>
+                <button class="icon-btn" data-action="remove-image" data-id="${id}" title="Delete">&times;</button>
               </div>
             </div>
           `;
@@ -836,29 +1016,52 @@ function renderSettings() {
     <section class="screen settings-screen">
       ${renderStatus(
         "Settings",
-        "本地存储 · 加密备份",
+        "",
         `<button class="icon-btn" data-action="back" title="Back">${icon.back}</button>`
       )}
       <div class="scroll">
-        <div class="settings-grid">
-          <div class="settings-card">
-            <h3>外观</h3>
-            
-          </div>
-          <div class="settings-card">
-            <h3>Backup Vault</h3>
-            <div class="export-row two-actions">
-              <button class="small-btn" data-action="export-preview">${icon.export} Export</button>
-              <button class="small-btn gold" data-action="import-backup">${icon.import} Import</button>
+        <div class="settings-grid product-settings-grid">
+          <div class="settings-card appearance-card">
+            <div class="settings-inline-head">
+              <div>
+                <h3>Appearance</h3>
+              </div>
+              <button class="theme-mini-toggle" data-action="theme" title="Theme"><span>${state.settings.theme === "light" ? icon.sun : icon.moon}</span></button>
+            </div>
+            <div class="appearance-options">
+              <div class="appearance-option">
+                <span class="appearance-swatch paper"></span>
+                <div><strong>Paper Glass</strong></div>
+              </div>
+              <div class="appearance-option">
+                <span class="appearance-swatch gold"></span>
+                <div><strong>Champagne Accent</strong></div>
+              </div>
             </div>
           </div>
+          <div class="settings-card backup-card">
+            <div class="settings-inline-head">
+              <div>
+                <h3>Backup Vault</h3>
+              </div>
+            </div>
+            <div class="export-row backup-actions">
+              <button class="small-btn" data-action="export-preview">${icon.export} Export</button>
+              <button class="small-btn gold" data-action="import-backup">${icon.import} Import</button>
+              <button class="small-btn" data-action="verify-backup">${icon.restore} Verify</button>
+              <button class="small-btn" data-action="export-diagnostics">${icon.history} Logs</button>
+            </div>
+          </div>
+
         </div>
       </div>
     </section>
   `;
 }
 
-function renderModal() {
+function renderModal()
+
+ {
   if (!ui.modal) return;
   app.insertAdjacentHTML("beforeend", `<div class="modal-backdrop" data-action="backdrop-close">${modalHtml(ui.modal)}</div>`);
 }
@@ -933,7 +1136,7 @@ function modalHtml(modal) {
     return `
       <div class="modal history-detail-modal">
         <h3>${escapeHtml(note.title || "Memo")}</h3>
-        <p class="muted">${escapeHtml(entry?.type === "expired" ? "Expired" : "Deleted")} · ${fmtTime(entry?.occurredAt)}</p>
+        <p class="muted">${escapeHtml(entry?.type === "expired" ? "Expired" : "Deleted")} 路 ${fmtTime(entry?.occurredAt)}</p>
         <div class="history-body">${sanitizeHtml(note.bodyHtml || "No Body")}</div>
         <div class="modal-actions">
           <button class="small-btn gold icon-only restore-btn" data-action="restore-history" data-id="${modal.id}" title="Restore">${icon.restore}</button>
@@ -980,6 +1183,56 @@ function modalHtml(modal) {
       </form>
     `;
   }
+  if (modal.type === "reminderHealth") {
+    const health = reminderHealthSnapshot();
+    return `
+      <div class="modal health-modal">
+        <h3>Reminder Health Check</h3>
+        <p class="muted">If reminders do not appear, this panel shows which phone permission or system state needs attention.</p>
+        <div class="health-grid">
+          ${healthRow("Notification Allowed", health.notificationAllowed)}
+          ${healthRow("Exact Alarm Allowed", health.exactAlarmAllowed)}
+          ${healthRow("Battery Unrestricted", health.batteryUnrestricted)}
+          ${healthRow("Full Screen Alert Available", health.fullScreenAlertAvailable)}
+          ${healthRow("Last Scheduled Time", null, health.lastScheduledTime)}
+          ${healthRow("Last Triggered Time", null, health.lastTriggeredTime)}
+        </div>
+        <div class="modal-actions single-save"><button class="small-btn gold" data-action="close-modal">Done</button></div>
+      </div>
+    `;
+  }
+
+  if (modal.type === "securityCenter") {
+    return `
+      <div class="modal security-modal">
+        <h3>Security Center</h3>
+        <div class="security-points">
+          <p><strong>No Internet Permission</strong><span>SmartMemo does not request internet access in the Android package.</span></p>
+          <p><strong>Encrypted Backup</strong><span>Exported .smemo files are encrypted and can be verified before import.</span></p>
+          <p><strong>Restore Support</strong><span>Deleted and expired memos can be restored from History.</span></p>
+          <p><strong>Local Control</strong><span>Your memos, folders, locks, images, and reminders remain on this phone unless you export a backup.</span></p>
+        </div>
+        <div class="modal-actions single-save"><button class="small-btn gold" data-action="close-modal">Done</button></div>
+      </div>
+    `;
+  }
+
+  if (modal.type === "verifyResult") {
+    const counts = modal.counts || {};
+    return `
+      <div class="modal backup-preview-modal">
+        <h3>Backup Verified</h3>
+        <p class="muted">This encrypted backup can be decrypted by SmartMemo.</p>
+        <div class="backup-checks">
+          ${checkboxRow("folders", "Folders", counts.folders || 0, false)}
+          ${checkboxRow("memos", "Memos", counts.memos || 0, false)}
+          ${checkboxRow("history", "History", counts.history || 0, false)}
+        </div>
+        <div class="modal-actions single-save"><button class="small-btn gold" data-action="close-modal">Done</button></div>
+      </div>
+    `;
+  }
+
   if (modal.type === "folderForm") {
     const folder = modal.folderId ? state.folders.find((item) => item.id === modal.folderId) : null;
     const recovery = folder ? plainPasswords.recovery.folders[folder.id] || {} : {};
@@ -1131,7 +1384,7 @@ function modalHtml(modal) {
   if (modal.type === "result") {
     return `
       <div class="modal result-modal ${modal.status || "success"}">
-        <h3>${escapeHtml(modal.title || "完成")}</h3>
+        <h3>${escapeHtml(modal.title || "瀹屾垚")}</h3>
         <p class="muted">${escapeHtml(modal.message || "")}</p>
         ${modal.path ? `<p class="export-path">${escapeHtml(modal.path)}</p>` : ""}
         <div class="modal-actions"><button class="small-btn gold" data-action="close-modal">Done</button></div>
@@ -1230,28 +1483,23 @@ function stepWheel(key, dir) {
   render();
 }
 
-function renderAlarm() {
-  if (!ui.alarm) return;
-  const note = state.notes.find((item) => item.id === ui.alarm.noteId);
-  app.insertAdjacentHTML(
-    "beforeend",
-    `
-      <div class="alarm-full timeup-full">
-        <div class="alarm-particles" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
-        <div class="timeup-card">
-          <div class="timeup-bell">${icon.bell}</div>
-          <h2>TIME IS UP</h2>
-          <p>${escapeHtml(note?.title || "Memo Reminder")}</p>
-          <div class="timeup-actions">
-            <button class="timeup-btn secondary" data-action="snooze-alarm" data-id="${ui.alarm.noteId}">10 MIN</button>
-            <button class="timeup-btn" data-action="stop-alarm" data-id="${ui.alarm.noteId}">GET IT!</button>
-          </div>
-        </div>
-      </div>
-    `
-  );
+function isBlankDraftNote(note) {
+  if (!note) return false;
+  const blankTitle = !String(note.title || "").trim();
+  const blankBody = !textFromHtml(note.bodyHtml || "");
+  const noImages = !Array.isArray(note.images) || note.images.length === 0;
+  return blankTitle && blankBody && noImages && !note.reminder && !note.hasPassword;
 }
 
+function discardBlankCurrentNote() {
+  const note = currentNote();
+  if (!isBlankDraftNote(note)) return false;
+  state.notes = state.notes.filter((item) => item.id !== note.id);
+  ui.unlockedNotes.delete(note.id);
+  addDiagnosticLog("memo.blank.discarded", { noteId: note.id, folderId: note.folderId || "root" });
+  scheduleSave();
+  return true;
+}
 function closeModal() {
   if (ui.modal?.type === "importPreview") ui.pendingImport = null;
   ui.modal = null;
@@ -1265,7 +1513,7 @@ function createNote(folderId = null) {
   const note = {
     id: uid("note"),
     folderId: folderId || null,
-    title: "Untitled Memo",
+    title: "",
     bodyHtml: "",
     favorite: false,
     category: "default",
@@ -1373,7 +1621,7 @@ function verifyPassword(form) {
     openUnlockedTarget(target, id);
   } else {
     ui.modal = { type: "unlock", target, id, error: "Incorrect Password" };
-    renderModalOnly();
+    render();
   }
 }
 function verifyRecovery(form) {
@@ -1542,14 +1790,18 @@ function saveNotePassword(form) {
   setRecovery("note", note.id, data);
   ui.modal = null;
   scheduleSave();
-  render();
+  if (password) setView(note.folderId ? "folder" : "home", { folderId: note.folderId || null, noteId: null });
+  else render();
 }
 
 function scheduleNativeAlarm(note) {
   if (!note?.reminder || !window.SmartMemoAndroid?.scheduleAlarm) return false;
   try {
-    return Boolean(window.SmartMemoAndroid.scheduleAlarm(note.reminder.id, Number(note.reminder.fireAt), note.title || "Memo Reminder"));
+    const ok = Boolean(window.SmartMemoAndroid.scheduleAlarm(note.reminder.id, Number(note.reminder.fireAt), note.title || "Memo Reminder", textFromHtml(note.bodyHtml || "").slice(0, 240)));
+    addDiagnosticLog("alarm.native.schedule", { reminderId: note.reminder.id, fireAt: note.reminder.fireAt, ok });
+    return ok;
   } catch (error) {
+    addDiagnosticLog("alarm.native.schedule.failed", { error: safeErrorSummary(error) });
     console.warn("Native alarm schedule failed", error);
     return false;
   }
@@ -1564,36 +1816,49 @@ function cancelNativeAlarm(reminderId) {
   }
 }
 
-function triggerAlarmForNote(note, reminder = note?.reminder) {
-  if (!note || !reminder || ui.alarm) return;
-  ui.alarm = { noteId: note.id, reminderId: reminder.id, fireAt: reminder.fireAt };
-  startAlarmVibration();
-  render();
-}
-
-function handleNativeAlarm(reminderId, title = "", fireAt = 0) {
-  const note = state.notes.find((item) => item.reminder?.id === reminderId) || state.notes.find((item) => item.reminder && item.reminder.fireAt <= Date.now() + 1500);
-  if (!note) {
-    ui.pendingNativeAlarms.push({ reminderId, title, fireAt });
-    return;
+function clearNativeAlarmAlert(reminderId) {
+  if (!reminderId || !window.SmartMemoAndroid?.clearAlarmAlert) return;
+  try {
+    window.SmartMemoAndroid.clearAlarmAlert(reminderId);
+  } catch (error) {
+    console.warn("Native alarm alert clear failed", error);
   }
-  triggerAlarmForNote(note, note.reminder || { id: reminderId, fireAt });
 }
-
-function flushNativeAlarms() {
-  if (!ui.pendingNativeAlarms.length) return;
-  const queued = [...ui.pendingNativeAlarms];
-  ui.pendingNativeAlarms = [];
-  queued.forEach((alarm) => handleNativeAlarm(alarm.reminderId, alarm.title, alarm.fireAt));
-}
-
 function syncNativeAlarms() {
   state.notes.forEach((note) => {
     if (note.reminder?.fireAt > Date.now()) scheduleNativeAlarm(note);
   });
 }
 
-window.smartMemoNativeAlarm = (reminderId, title, fireAt) => handleNativeAlarm(String(reminderId || ""), String(title || ""), Number(fireAt || 0));
+window.smartMemoNativeOpenReminder = (reminderId) => {
+  const id = String(reminderId || "");
+  const note = state.notes.find((item) => item.reminder?.id === id);
+  if (!note) return;
+  const folder = state.folders.find((item) => item.id === note.folderId);
+  if (folder?.hasPassword && !ui.unlockedFolders.has(folder.id)) {
+    ui.modal = { type: "unlock", target: "folder", id: folder.id };
+    render();
+    return;
+  }
+  if (note.hasPassword && !ui.unlockedNotes.has(note.id)) {
+    ui.modal = { type: "unlock", target: "note", id: note.id };
+    render();
+    return;
+  }
+  setView("editor", { noteId: note.id, folderId: note.folderId || null });
+};
+window.smartMemoNativeCompleteReminder = (reminderId) => {
+  const id = String(reminderId || "");
+  const note = state.notes.find((item) => item.reminder?.id === id);
+  if (!note) return;
+  cancelNativeAlarm(id);
+  clearNativeAlarmAlert(id);
+  note.reminder = null;
+  note.updatedAt = nowIso();
+  addDiagnosticLog("reminder.completed.from.notification", { reminderId: id, noteId: note.id });
+  scheduleSave();
+  setView(note.folderId ? "folder" : "home", { folderId: note.folderId || null, noteId: null });
+};
 function saveReminder(form) {
   const data = Object.fromEntries(new FormData(form));
   const note = state.notes.find((item) => item.id === data.id);
@@ -1607,7 +1872,6 @@ function saveReminder(form) {
   note.updatedAt = nowIso();
   ui.modal = null;
   scheduleNativeAlarm(note);
-  setTimeout(checkAlarms, 250);
   ui.wheelDraft = null;
   scheduleSave();
   render();
@@ -1724,7 +1988,7 @@ function deleteFolder(id) {
   scheduleSave();
 }
 function downloadFolderHint() {
-  return "目标文件夹：浏览器默认下载目录（Windows 通常为 C:\\Users\\你的用户名\\Downloads）";
+  return "Saved To The Phone Download Folder Or The Browser Default Download Folder.";
 }
 
 function restoreHistory(id, options = {}) {
@@ -1843,13 +2107,15 @@ async function exportBackup(options = {}) {
     });
     const fileName = `SmartMemo-backup-${Date.now()}.smemo`;
     const backupText = JSON.stringify(encrypted);
+    const verified = await decryptPayload(JSON.parse(backupText));
+    const counts = backupCounts(verified.state);
     const nativeResult = nativeSaveBackup(fileName, backupText);
     if (nativeResult) {
       ui.modal = {
         type: "result",
         status: "success",
         title: "Mobile Export Complete",
-        message: "Backup File Was Saved On This Phone.",
+        message: `Backup Verified ? ${counts.folders} Folders ? ${counts.memos} Memos ? ${counts.history} History Items`,
         path: nativeResult.path || `Downloads/SmartMemo/${fileName}`
       };
     } else {
@@ -1864,15 +2130,32 @@ async function exportBackup(options = {}) {
         type: "result",
         status: "success",
         title: "Export Started",
-        message: "Browser Download Started. Please Check Your Downloads Folder.",
+        message: `Backup Verified ? ${counts.folders} Folders ? ${counts.memos} Memos ? ${counts.history} History Items`,
         path: downloadFolderHint()
       };
     }
   } catch (error) {
+    addDiagnosticLog("backup.export.failed", { error: safeErrorSummary(error) });
     ui.modal = { type: "result", status: "error", title: "Mobile Export Failed", message: error?.message || "Backup File Was Not Saved On This Phone." };
   }
   render();
 }
+async function verifyBackupFile(file) {
+  try {
+    const text = await file.text();
+    const encrypted = JSON.parse(text);
+    const imported = await decryptPayload(encrypted);
+    if (!imported?.state?.notes || !imported?.state?.folders) throw new Error("INVALID_BACKUP");
+    const counts = backupCounts(imported.state);
+    addDiagnosticLog("backup.verify.success", counts);
+    ui.modal = { type: "verifyResult", counts };
+  } catch (error) {
+    addDiagnosticLog("backup.verify.failed", { error: safeErrorSummary(error) });
+    ui.modal = { type: "result", status: "error", title: "Verify Failed", message: "This Backup Could Not Be Decrypted By SmartMemo." };
+  }
+  render();
+}
+
 async function previewImportBackup(file) {
   const text = await file.text();
   const encrypted = JSON.parse(text);
@@ -1940,45 +2223,10 @@ async function applyImportBackup(imported, options = {}) {
   normalizeState();
   await saveNow();
   ui.pendingImport = null;
+  addDiagnosticLog("backup.import.success", backupCounts(imported.state));
   ui.modal = { type: "result", status: "success", title: "Import Complete", message: "Selected Backup Data Restored." };
   render();
 }
-function checkAlarms() {
-  const due = state.notes.find((note) => note.reminder && note.reminder.fireAt <= Date.now());
-  triggerAlarmForNote(due);
-}
-
-function snoozeAlarm(noteId) {
-  const note = state.notes.find((item) => item.id === noteId);
-  if (note?.reminder) {
-    note.reminder.fireAt = Date.now() + 10 * 60 * 1000;
-    scheduleNativeAlarm(note);
-  }
-  stopAlarmVibration();
-  ui.alarm = null;
-  scheduleSave();
-  render();
-}
-
-function stopAlarm(noteId) {
-  stopAlarmVibration();
-  const note = state.notes.find((item) => item.id === noteId);
-  if (note) {
-    const reminder = note.reminder || ui.alarm;
-    cancelNativeAlarm(reminder?.id || ui.alarm?.reminderId);
-    archiveHistory("expired", note, {
-      reminderId: reminder?.id || ui.alarm?.reminderId,
-      occurredAt: new Date(reminder?.fireAt || Date.now()).toISOString()
-    });
-    state.notes = state.notes.filter((item) => item.id !== noteId);
-    delete plainPasswords.notes[noteId];
-    ui.unlockedNotes.delete(noteId);
-  }
-  ui.alarm = null;
-  setView("history", { noteId: null, folderId: null });
-  scheduleSave();
-}
-
 function refreshSearchResults() {
   if (ui.view === "home") {
     const folders = childFolders(null).filter((folder) => !ui.search.trim() || fuzzyIncludes(`${folder.name} ${notesFor(folder.id).map((note) => `${note.title} ${textFromHtml(note.bodyHtml)}`).join(" ")}`, ui.search));
@@ -1986,8 +2234,8 @@ function refreshSearchResults() {
     const folderBox = document.querySelector(".folder-strip.compact-folders");
     const noteBox = document.querySelector(".vault-root-notes");
     const count = document.querySelector(".active-count");
-    if (folderBox) folderBox.innerHTML = folders.map(renderFolderCard).join("") || `<div class="empty-card">No Spaces</div>`;
-    if (noteBox) noteBox.innerHTML = rootNotes.map(renderNoteCard).join("") || `<div class="empty-card">Tap + To Create Memo</div>`;
+    if (folderBox) folderBox.innerHTML = folders.map(renderFolderCard).join("") || `<div class="empty-folder-state home-empty-state">No Spaces</div>`;
+    if (noteBox) noteBox.innerHTML = rootNotes.map(renderNoteCard).join("") || `<div class="empty-folder-state home-empty-state">Tap + To Create Memo</div>`;
     if (count) count.textContent = `${rootNotes.length} Memos`;
   }
   if (ui.view === "folder") {
@@ -2043,7 +2291,7 @@ function refreshCurrentFolderStrip() {
   const folderBox = ui.view === "folder" ? document.querySelector(".nested-folders") : document.querySelector(".vault-screen .folder-strip.compact-folders");
   if (!folderBox) return;
   const left = folderBox.scrollLeft;
-  folderBox.innerHTML = folders.map(renderFolderCard).join("") || `<div class="empty-card">No Spaces</div>`;
+  folderBox.innerHTML = folders.map(renderFolderCard).join("") || `<div class="empty-folder-state home-empty-state">No Spaces</div>`;
   folderBox.scrollLeft = left;
 }
 function moveNoteToFolder(noteId, folderId, beforeId = null) {
@@ -2074,29 +2322,37 @@ function reorderNoteBefore(noteId, beforeId) {
 function refreshCurrentMemoList() {
   if (ui.view === "home") {
     const noteBox = document.querySelector(".vault-root-notes");
-    if (noteBox) noteBox.innerHTML = filteredNotes(notesFor("root")).map(renderNoteCard).join("") || `<div class="empty-card">Tap + To Create Memo</div>`;
+    if (noteBox) noteBox.innerHTML = filteredNotes(notesFor("root")).map(renderNoteCard).join("") || `<div class="empty-folder-state home-empty-state">Tap + To Create Memo</div>`;
   } else if (ui.view === "folder") {
     const noteBox = document.querySelector(".folder-note-list");
     if (noteBox) noteBox.innerHTML = filteredNotes(notesFor(ui.folderId)).map(renderNoteCard).join("") || `<div class="empty-folder-state">No Memos In This Space</div>`;
   }
 }
 function renderDragLayer() {
-  document.querySelector(".drag-ghost")?.remove();
   const drag = ui.drag;
-  if (!drag) return;
-  const ghost = document.createElement("div");
-  ghost.className = `drag-ghost ${drag.type === "folder" ? "folder-drag-ghost" : ""}`;
-  if (drag.type === "folder") {
-    const folder = state.folders.find((item) => item.id === drag.folderId);
-    const count = state.notes.filter((note) => note.folderId === drag.folderId).length;
-    ghost.innerHTML = `<strong>${escapeHtml(folder?.name || "Untitled Space")}</strong><span>SmartMemo Space</span>`;
-  } else {
-    const note = state.notes.find((item) => item.id === drag.noteId);
-    ghost.innerHTML = `<strong>${escapeHtml(note?.title || "Untitled Memo")}</strong><span>${escapeHtml(textFromHtml(note?.bodyHtml || "No Body").slice(0, 42))}</span>`;
+  let ghost = document.querySelector(".drag-ghost");
+  if (!drag) {
+    ghost?.remove();
+    return;
+  }
+  const dragKey = drag.type === "folder" ? `folder:${drag.folderId}` : `note:${drag.noteId}`;
+  if (!ghost) {
+    ghost = document.createElement("div");
+    document.body.appendChild(ghost);
+  }
+  if (ghost.dataset.dragKey !== dragKey) {
+    ghost.dataset.dragKey = dragKey;
+    ghost.className = `drag-ghost ${drag.type === "folder" ? "folder-drag-ghost" : ""}`;
+    if (drag.type === "folder") {
+      const folder = state.folders.find((item) => item.id === drag.folderId);
+      ghost.innerHTML = `<strong>${escapeHtml(folder?.name || "Untitled Space")}</strong><span>SmartMemo Space</span>`;
+    } else {
+      const note = state.notes.find((item) => item.id === drag.noteId);
+      ghost.innerHTML = `<strong>${escapeHtml(note?.title || "Untitled Memo")}</strong><span>${escapeHtml(textFromHtml(note?.bodyHtml || "No Body").slice(0, 42))}</span>`;
+    }
   }
   ghost.style.left = `${drag.x}px`;
   ghost.style.top = `${drag.y}px`;
-  document.body.appendChild(ghost);
 }
 
 function clearDragTargets() {
@@ -2205,6 +2461,7 @@ function updateFolderDrag(event) {
   if (ui.drag.overFolderId !== markerKey) {
     ui.drag.overFolderId = markerKey;
     if (reorderFolderBefore(ui.drag.folderId, beforeId)) {
+      ui.drag.didReorder = true;
       refreshCurrentFolderStrip();
       renderDragLayer();
     }
@@ -2240,6 +2497,7 @@ function updateMemoDrag(event) {
     if (ui.drag.overNoteId !== noteCard.dataset.longNote) {
       ui.drag.overNoteId = noteCard.dataset.longNote;
       if (reorderNoteBefore(ui.drag.noteId, ui.drag.overNoteId)) {
+        ui.drag.didReorder = true;
         refreshCurrentMemoList();
         renderDragLayer();
       }
@@ -2259,6 +2517,8 @@ function finishFolderDrag() {
   scheduleSave();
   renderPreservingScroll();
 }
+
+
 
 function finishMemoDrag(event) {
   if (!ui.drag) return;
@@ -2280,6 +2540,8 @@ function finishMemoDrag(event) {
     renderPreservingScroll();
   }
 }
+
+
 function togglePin(target, id) {
   const list = target === "folder" ? state.folders : state.notes;
   const item = list.find((entry) => entry.id === id);
@@ -2297,21 +2559,6 @@ function lockTarget(target, id) {
   render();
 }
 
-function startAlarmVibration() {
-  clearInterval(ui.alarmVibrateTimer);
-  if (window.SmartMemoAndroid?.startVibration) window.SmartMemoAndroid.startVibration();
-  if (navigator.vibrate) {
-    navigator.vibrate([260, 100, 260, 100, 420]);
-    ui.alarmVibrateTimer = setInterval(() => navigator.vibrate([260, 100, 260, 100, 420]), 1300);
-  }
-}
-
-function stopAlarmVibration() {
-  clearInterval(ui.alarmVibrateTimer);
-  ui.alarmVibrateTimer = null;
-  if (window.SmartMemoAndroid?.stopVibration) window.SmartMemoAndroid.stopVibration();
-  if (navigator.vibrate) navigator.vibrate(0);
-}
 function hideFormatPopover() {
   const popover = document.querySelector("[data-format-popover]");
   if (popover) popover.classList.remove("show");
@@ -2414,7 +2661,7 @@ app.addEventListener("click", async (event) => {
   const action = target.dataset.action;
   const id = target.dataset.id;
 
-  
+
   if (action === "wheel-step") {
     stepWheel(target.dataset.key, Number(target.dataset.dir));
     return;
@@ -2479,9 +2726,21 @@ app.addEventListener("click", async (event) => {
     togglePin("note", id);
     return;
   }
-if (action === "back") setView("home", { folderId: null, noteId: null });
-  if (action === "back-folder") setView("folder", { noteId: null });
+if (action === "back") {
+    discardBlankCurrentNote();
+    setView("home", { folderId: null, noteId: null });
+  }
+  if (action === "back-folder") {
+    discardBlankCurrentNote();
+    setView("folder", { noteId: null });
+  }
   if (action === "settings") setView("settings");
+  if (action === "breadcrumb-folder") {
+    ui.search = "";
+    if (id === "root") setView("home", { folderId: null, noteId: null });
+    else setView("folder", { folderId: id, noteId: null });
+  }
+
   if (action === "dock-vault") {
     ui.tab = "all";
     ui.search = "";
@@ -2619,10 +2878,23 @@ if (action === "back") setView("home", { folderId: null, noteId: null });
   if (action === "export-preview") {
     ui.modal = { type: "exportPreview" };
     render();
+  }  if (action === "import-backup") {
+    ui.backupPickerMode = "import";
+    backupPicker.click();
   }
-  if (action === "import-backup") backupPicker.click();
-  if (action === "snooze-alarm") snoozeAlarm(id);
-  if (action === "stop-alarm") stopAlarm(id);
+  if (action === "verify-backup") {
+    ui.backupPickerMode = "verify";
+    backupPicker.click();
+  }
+  if (action === "reminder-health") {
+    ui.modal = { type: "reminderHealth" };
+    render();
+  }
+  if (action === "security-center") {
+    ui.modal = { type: "securityCenter" };
+    render();
+  }
+  if (action === "export-diagnostics") exportDiagnosticLog();
   if (action === "history-detail") {
     ui.modal = { type: "historyDetail", id };
     render();
@@ -2677,7 +2949,7 @@ app.addEventListener("compositionend", (event) => {
   if (event.target?.dataset?.action !== "search") return;
   ui.composingSearch = false;
   ui.search = event.target.value || "";
-  renderPreservingScroll();
+  refreshSearchResults();
 });
 
 app.addEventListener("input", (event) => {
@@ -2685,7 +2957,7 @@ app.addEventListener("input", (event) => {
   const action = target?.dataset?.action;
   if (action === "search") {
     ui.search = target.value || "";
-    if (!ui.composingSearch) renderPreservingScroll();
+    if (!ui.composingSearch) refreshSearchResults();
     return;
   }
   if (action === "edit-title") updateCurrentNote({ title: target.value });
@@ -2701,12 +2973,14 @@ backupPicker.addEventListener("change", async () => {
   const file = backupPicker.files?.[0];
   if (!file) return;
   try {
-    await previewImportBackup(file);
+    if (ui.backupPickerMode === "verify") await verifyBackupFile(file);
+    else await previewImportBackup(file);
   } catch (error) {
     ui.modal = { type: "result", status: "error", title: "Import Failed", message: error?.message || "Backup Could Not Be Read." };
     render();
   } finally {
     backupPicker.value = "";
+    ui.backupPickerMode = "import";
   }
 });
 app.addEventListener("click", (event) => {
@@ -2900,7 +3174,6 @@ async function boot() {
     await load();
     syncNativeAlarms();
     render();
-    flushNativeAlarms();
     finishSplash();
   } catch (error) {
     finishSplash();
@@ -2917,5 +3190,4 @@ async function boot() {
 }
 
 armEditorSelectionTools();
-setInterval(checkAlarms, 1000);
 boot();
