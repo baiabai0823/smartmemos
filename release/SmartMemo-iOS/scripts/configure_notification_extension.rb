@@ -9,7 +9,7 @@ app_target = project.targets.find { |target| target.name == "App" }
 abort("Capacitor App target was not found") unless app_target
 
 project.targets.select { |target| target.name == "SmartMemoNotification" }.each(&:remove_from_project)
-extension_target = project.new_target(:app_extension, "SmartMemoNotification", :ios, "14.0", "SmartMemoNotification")
+extension_target = project.new_target(:app_extension, "SmartMemoNotification", :ios, "14.0")
 
 group = project.main_group.new_group("SmartMemoNotification", "../../native/SmartMemoNotification")
 swift_ref = group.new_file("NotificationViewController.swift")
