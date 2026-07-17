@@ -12,6 +12,33 @@ const backupPicker = $("#backupPicker");
 const IS_NATIVE_IOS = window.Capacitor?.getPlatform?.() === "ios";
 
 document.documentElement.classList.toggle("ios-native", IS_NATIVE_IOS);
+const IOS_NOTIFICATION_ACTION_TYPE = "SMARTMEMO_REMINDER";
+const IOS_NOTIFICATION_IDS_KEY = "smartmemo.ios.notification.ids.v1";
+const IOS_NOTIFICATION_PERMISSION_KEY = "smartmemo.ios.notification.permission.v1";
+const IOS_NOTIFICATION_LIMIT = 60;
+const IOS_REMINDER_STAGES = [
+  ["d90", 90 * 86400000, "90 Days Left", "Your memo is now in its planning window.", "normal"],
+  ["d80", 80 * 86400000, "80 Days Left", "Keep the plan moving at a steady pace.", "normal"],
+  ["d70", 70 * 86400000, "70 Days Left", "A calm progress check is recommended.", "normal"],
+  ["d60", 60 * 86400000, "60 Days Left", "Confirm the next milestone when ready.", "normal"],
+  ["d50", 50 * 86400000, "50 Days Left", "Preparation can begin gradually.", "normal"],
+  ["d40", 40 * 86400000, "40 Days Left", "Focus on the core preparation.", "normal"],
+  ["d30", 30 * 86400000, "30 Days Left", "The important preparation window begins.", "normal"],
+  ["d20", 20 * 86400000, "20 Days Left", "The deadline is getting closer.", "normal"],
+  ["d10", 10 * 86400000, "10 Days Left", "Confirm the final plan.", "normal"],
+  ["d5", 5 * 86400000, "5 Days Left", "Begin final preparation.", "near"],
+  ["d3", 3 * 86400000, "3 Days Left", "Check the remaining details.", "near"],
+  ["d2", 2 * 86400000, "2 Days Left", "The memo is approaching its deadline.", "near"],
+  ["d1", 86400000, "1 Day Left", "Complete the final review today.", "near"],
+  ["h12", 12 * 3600000, "12 Hours Left", "The deadline is later today.", "near"],
+  ["h6", 6 * 3600000, "6 Hours Left", "Please keep this memo in view.", "near"],
+  ["h3", 3 * 3600000, "3 Hours Left", "This memo is now time-sensitive.", "near"],
+  ["h1", 3600000, "1 Hour Left", "Final confirmation is recommended.", "urgent"],
+  ["m30", 30 * 60000, "30 Minutes Left", "Please complete the final check.", "urgent"],
+  ["m10", 10 * 60000, "10 Minutes Left", "Last call. Please take action now.", "urgent"],
+  ["m3", 3 * 60000, "3 Minutes Left", "The deadline is almost here.", "urgent"],
+  ["due", 0, "Due Now", "This memo has reached its deadline.", "urgent"]
+];
 
 let state = {
   folders: [],
@@ -805,7 +832,7 @@ function renderHistory() {
       )}
       <div class="scroll">
         <div class="note-list history-list">
-          ${entries.map(renderHistoryCard).join("") || `<div class="empty-card">No Deleted Or Expired Memos</div>`}
+          ${entries.map(renderHistoryCard).join("") || `<div class="empty-folder-state home-empty-state history-empty-state">No Deleted Or Expired Memos</div>`}
         </div>
       </div>
       ${renderDock("history")}
@@ -1823,35 +1850,165 @@ function saveNotePassword(form) {
   else render();
 }
 
-function scheduleNativeAlarm(note) {
-  if (!note?.reminder || !window.SmartMemoAndroid?.scheduleAlarm) return false;
+function iosNotificationsPlugin() {
+  return IS_NATIVE_IOS ? window.Capacitor?.Plugins?.LocalNotifications : null;
+}
+
+function iosNotificationId(reminderId, stageCode) {
+  const source = `${reminderId}|${stageCode}`;
+  let hash = 2166136261;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return Math.abs(hash | 0) || 1;
+}
+
+function iosStoredNotificationIds() {
   try {
-    const ok = Boolean(window.SmartMemoAndroid.scheduleAlarm(note.reminder.id, Number(note.reminder.fireAt), note.title || "Memo Reminder"));
-    addDiagnosticLog("alarm.native.schedule", { reminderId: note.reminder.id, fireAt: note.reminder.fireAt, ok });
-    return ok;
-  } catch (error) {
-    addDiagnosticLog("alarm.native.schedule.failed", { error: safeErrorSummary(error) });
-    console.warn("Native alarm schedule failed", error);
-    return false;
+    const value = JSON.parse(localStorage.getItem(IOS_NOTIFICATION_IDS_KEY) || "[]");
+    return Array.isArray(value) ? value.filter(Number.isInteger) : [];
+  } catch {
+    return [];
   }
 }
 
-function cancelNativeAlarm(reminderId) {
-  if (!reminderId || !window.SmartMemoAndroid?.cancelAlarm) return;
+async function ensureIosNotificationPermission() {
+  const plugin = iosNotificationsPlugin();
+  if (!plugin) return false;
+  const current = await plugin.checkPermissions();
+  if (current.display === "granted") return true;
+  if (localStorage.getItem(IOS_NOTIFICATION_PERMISSION_KEY) === "requested" && current.display === "denied") return false;
+  localStorage.setItem(IOS_NOTIFICATION_PERMISSION_KEY, "requested");
+  const requested = await plugin.requestPermissions();
+  return requested.display === "granted";
+}
+
+function iosReminderCandidates() {
+  const now = Date.now();
+  const formatter = new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return state.notes.flatMap((note) => {
+    if (!note.reminder?.id || Number(note.reminder.fireAt) <= now) return [];
+    const deadline = Number(note.reminder.fireAt);
+    return IOS_REMINDER_STAGES.map(([code, offset, remaining, content, level]) => ({
+      id: iosNotificationId(note.reminder.id, code),
+      triggerAt: deadline - offset,
+      notification: {
+        id: iosNotificationId(note.reminder.id, code),
+        title: String(note.title || "Memo Reminder").trim().slice(0, 42),
+        body: `${remaining}  -  Due ${formatter.format(deadline)}` + "\n" + content,
+        sound: "default",
+        threadIdentifier: `smartmemo-${note.reminder.id}`,
+        schedule: { at: new Date(deadline - offset) },
+        actionTypeId: IOS_NOTIFICATION_ACTION_TYPE,
+        extra: {
+          reminderId: note.reminder.id,
+          noteId: note.id,
+          fireAt: deadline,
+          remaining,
+          deadline: formatter.format(deadline),
+          level,
+          content
+        }
+      }
+    })).filter((item) => item.triggerAt > now + 1000);
+  }).sort((a, b) => a.triggerAt - b.triggerAt).slice(0, IOS_NOTIFICATION_LIMIT);
+}
+
+let iosNotificationSyncPromise = Promise.resolve();
+function syncIosNotifications() {
+  const plugin = iosNotificationsPlugin();
+  if (!plugin) return Promise.resolve(false);
+  iosNotificationSyncPromise = iosNotificationSyncPromise.then(async () => {
+    const previousIds = iosStoredNotificationIds();
+    const candidates = iosReminderCandidates();
+    if (!candidates.length) {
+      if (previousIds.length) await plugin.cancel({ notifications: previousIds.map((id) => ({ id })) });
+      localStorage.setItem(IOS_NOTIFICATION_IDS_KEY, "[]");
+      return true;
+    }
+    if (!(await ensureIosNotificationPermission())) return false;
+    if (previousIds.length) await plugin.cancel({ notifications: previousIds.map((id) => ({ id })) });
+    await plugin.schedule({ notifications: candidates.map((item) => item.notification) });
+    localStorage.setItem(IOS_NOTIFICATION_IDS_KEY, JSON.stringify(candidates.map((item) => item.id)));
+    addDiagnosticLog("reminder.ios.sync", { scheduled: candidates.length, limit: IOS_NOTIFICATION_LIMIT });
+    return true;
+  }).catch((error) => {
+    addDiagnosticLog("reminder.ios.sync.failed", { error: safeErrorSummary(error) });
+    return false;
+  });
+  return iosNotificationSyncPromise;
+}
+
+async function initializeIosNotifications() {
+  const plugin = iosNotificationsPlugin();
+  if (!plugin) return;
   try {
-    window.SmartMemoAndroid.cancelAlarm(reminderId);
+    await plugin.registerActionTypes({
+      types: [{
+        id: IOS_NOTIFICATION_ACTION_TYPE,
+        actions: [
+          { id: "VIEW_MEMO", title: "View Memo", foreground: true },
+          { id: "COMPLETE_MEMO", title: "Mark Complete", foreground: true },
+          { id: "SNOOZE_10", title: "Remind In 10 Minutes", foreground: false }
+        ]
+      }]
+    });
+    await plugin.addListener("localNotificationActionPerformed", (event) => {
+      const extra = event?.notification?.extra || {};
+      const note = state.notes.find((item) => item.id === extra.noteId || item.reminder?.id === extra.reminderId);
+      if (!note) return;
+      if (event.actionId === "COMPLETE_MEMO") return stopAlarm(note.id);
+      if (event.actionId === "SNOOZE_10") return snoozeAlarm(note.id);
+      ui.unlockedNotes.add(note.id);
+      setView("editor", { noteId: note.id, folderId: note.folderId || null });
+    });
   } catch (error) {
-    console.warn("Native alarm cancel failed", error);
+    addDiagnosticLog("reminder.ios.initialize.failed", { error: safeErrorSummary(error) });
+  }
+}
+function scheduleNativeAlarm(note) {
+  if (!note?.reminder) return false;
+  if (window.SmartMemoAndroid?.scheduleAlarm) {
+    try {
+      const ok = Boolean(window.SmartMemoAndroid.scheduleAlarm(note.reminder.id, Number(note.reminder.fireAt), note.title || "Memo Reminder"));
+      addDiagnosticLog("alarm.native.schedule", { reminderId: note.reminder.id, fireAt: note.reminder.fireAt, ok });
+      return ok;
+    } catch (error) {
+      addDiagnosticLog("alarm.native.schedule.failed", { error: safeErrorSummary(error) });
+      return false;
+    }
+  }
+  if (iosNotificationsPlugin()) {
+    syncIosNotifications();
+    return true;
+  }
+  return false;
+}
+
+function cancelNativeAlarm(reminderId) {
+  if (!reminderId) return;
+  if (window.SmartMemoAndroid?.cancelAlarm) {
+    try { window.SmartMemoAndroid.cancelAlarm(reminderId); } catch (error) { console.warn("Native alarm cancel failed", error); }
+    return;
+  }
+  const plugin = iosNotificationsPlugin();
+  if (plugin) {
+    const notifications = IOS_REMINDER_STAGES.map(([code]) => ({ id: iosNotificationId(reminderId, code) }));
+    plugin.cancel({ notifications }).finally(() => setTimeout(syncIosNotifications, 0));
   }
 }
 
 function clearNativeAlarmAlert(reminderId) {
-  if (!reminderId || !window.SmartMemoAndroid?.clearAlarmAlert) return;
-  try {
-    window.SmartMemoAndroid.clearAlarmAlert(reminderId);
-  } catch (error) {
-    console.warn("Native alarm alert clear failed", error);
+  if (!reminderId) return;
+  if (window.SmartMemoAndroid?.clearAlarmAlert) {
+    try { window.SmartMemoAndroid.clearAlarmAlert(reminderId); } catch (error) { console.warn("Native alarm alert clear failed", error); }
+    return;
   }
+  const plugin = iosNotificationsPlugin();
+  if (!plugin) return;
+  const notifications = IOS_REMINDER_STAGES.map(([code]) => ({ id: iosNotificationId(reminderId, code) }));
+  plugin.removeDeliveredNotifications({ notifications }).catch(() => {});
 }
 function triggerAlarmForNote(note, reminder = note?.reminder) {
   if (!note || !reminder || ui.alarm) return;
@@ -1878,6 +2035,10 @@ function flushNativeAlarms() {
 }
 
 function syncNativeAlarms() {
+  if (iosNotificationsPlugin()) {
+    syncIosNotifications();
+    return;
+  }
   state.notes.forEach((note) => {
     if (note.reminder?.fireAt > Date.now()) scheduleNativeAlarm(note);
   });
@@ -2276,6 +2437,7 @@ async function applyImportBackup(imported, options = {}) {
   render();
 }
 function checkAlarms() {
+  if (IS_NATIVE_IOS) return;
   const due = state.notes.find((note) => note.reminder && note.reminder.fireAt <= Date.now());
   triggerAlarmForNote(due);
 }
@@ -3277,6 +3439,7 @@ function finishSplash() {
 async function boot() {
   try {
     await load();
+    await initializeIosNotifications();
     syncNativeAlarms();
     render();
     flushNativeAlarms();

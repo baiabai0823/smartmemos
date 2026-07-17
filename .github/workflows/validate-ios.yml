@@ -1,0 +1,74 @@
+name: Validate SmartMemo iOS
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/ios-reminder-notifications
+    paths:
+      - "iphone-memo-app/**"
+      - "release/SmartMemo-iOS/**"
+      - ".github/workflows/validate-ios.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate-ios:
+    runs-on: macos-15
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: release/SmartMemo-iOS/package-lock.json
+
+      - name: Prepare iOS web assets
+        shell: bash
+        run: |
+          mkdir -p release/SmartMemo-iOS/www
+          cp -R iphone-memo-app/. release/SmartMemo-iOS/www/
+
+      - name: Install Capacitor
+        working-directory: release/SmartMemo-iOS
+        run: npm ci
+
+      - name: Create native iOS project
+        working-directory: release/SmartMemo-iOS
+        run: |
+          npx cap add ios
+          npx cap sync ios
+
+      - name: Configure notification extension
+        shell: bash
+        run: |
+          gem list -i xcodeproj >/dev/null || gem install xcodeproj --no-document
+          ruby release/SmartMemo-iOS/scripts/configure_notification_extension.rb
+
+      - name: Configure application metadata
+        shell: bash
+        run: |
+          PLIST="release/SmartMemo-iOS/ios/App/App/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName SmartMemo" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.1.0" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 2" "$PLIST"
+
+      - name: Validate Xcode build
+        shell: bash
+        run: |
+          cd release/SmartMemo-iOS/ios/App
+          xcodebuild \
+            -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$RUNNER_TEMP/SmartMemoDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build

@@ -47,11 +47,20 @@ jobs:
           npx cap add ios
           npx cap sync ios
 
+
+      - name: Configure SmartMemo notification extension
+        shell: bash
+        run: |
+          gem list -i xcodeproj >/dev/null || gem install xcodeproj --no-document
+          ruby release/SmartMemo-iOS/scripts/configure_notification_extension.rb
+
       - name: Configure iPhone application
         shell: bash
         run: |
           PLIST="release/SmartMemo-iOS/ios/App/App/Info.plist"
           /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName SmartMemo" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.1.0" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 2" "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :ITSAppUsesNonExemptEncryption bool false" "$PLIST" || \
             /usr/libexec/PlistBuddy -c "Set :ITSAppUsesNonExemptEncryption false" "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :NSPhotoLibraryUsageDescription string SmartMemo uses selected photos only when you insert them into a memo." "$PLIST" || true
