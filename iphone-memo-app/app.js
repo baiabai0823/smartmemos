@@ -45,7 +45,7 @@ let state = {
   notes: [],
   history: [],
   settings: {
-    theme: "dark"
+    theme: "light"
   }
 };
 
@@ -326,7 +326,7 @@ function normalizeState() {
   state.folders = Array.isArray(state.folders) ? state.folders : [];
   state.notes = Array.isArray(state.notes) ? state.notes : [];
   state.history = Array.isArray(state.history) ? state.history.filter((entry) => entry?.type !== "version") : [];
-  state.settings = { theme: "dark", ...(state.settings || {}) };
+  state.settings = { theme: "light", ...(state.settings || {}) };
   plainPasswords = mergePasswordVault(state.passwordVault || {}, plainPasswords);
   delete state.passwordVault;
   state.folders.forEach((folder) => {
@@ -1966,7 +1966,13 @@ async function initializeIosNotifications() {
     await plugin.addListener("localNotificationActionPerformed", (event) => {
       const extra = event?.notification?.extra || {};
       const note = state.notes.find((item) => item.id === extra.noteId || item.reminder?.id === extra.reminderId);
-      if (!note) return;
+      if (!note) {
+        const historyEntry = state.history.find((entry) => entry.reminderId === extra.reminderId || entry.note?.id === extra.noteId);
+        if (historyEntry && event.actionId !== "COMPLETE_MEMO" && event.actionId !== "SNOOZE_10") {
+          setView("history", { noteId: null, folderId: null, modal: { type: "historyDetail", id: historyEntry.id } });
+        }
+        return;
+      }
       if (event.actionId === "COMPLETE_MEMO") return stopAlarm(note.id);
       if (event.actionId === "SNOOZE_10") return snoozeAlarm(note.id);
       openReminderFromNotification(note);
@@ -2119,6 +2125,13 @@ function archiveDueNote(note) {
   ui.unlockedNotes.delete(note.id);
   scheduleSave();
   return historyId;
+}
+
+function archiveIosDueNotes() {
+  if (!IS_NATIVE_IOS) return 0;
+  const dueNotes = state.notes.filter((note) => note.reminder && Number(note.reminder.fireAt) <= Date.now() - 3000);
+  dueNotes.forEach(archiveDueNote);
+  return dueNotes.length;
 }
 
 function openReminderFromNotification(note) {
@@ -2481,7 +2494,10 @@ async function applyImportBackup(imported, options = {}) {
   render();
 }
 function checkAlarms() {
-  if (IS_NATIVE_IOS) return;
+  if (IS_NATIVE_IOS) {
+    if (archiveIosDueNotes()) render();
+    return;
+  }
   const due = state.notes.find((note) => note.reminder && note.reminder.fireAt <= Date.now());
   triggerAlarmForNote(due);
 }
@@ -2604,11 +2620,15 @@ function moveNoteToFolder(noteId, folderId, beforeId = null) {
   return true;
 }
 
-function reorderNoteBefore(noteId, beforeId) {
+function reorderNoteBefore(noteId, beforeId, placeAfter = false) {
   if (!beforeId || noteId === beforeId) return false;
   const target = state.notes.find((item) => item.id === beforeId);
   if (!target) return false;
-  return moveNoteToFolder(noteId, target.folderId || null, beforeId);
+  if (!placeAfter) return moveNoteToFolder(noteId, target.folderId || null, beforeId);
+  const siblings = notesFor(folderKey(target.folderId || null)).filter((item) => item.id !== noteId);
+  const targetIndex = siblings.findIndex((item) => item.id === beforeId);
+  const nextId = targetIndex >= 0 ? siblings[targetIndex + 1]?.id || null : null;
+  return moveNoteToFolder(noteId, target.folderId || null, nextId);
 }
 
 function refreshCurrentMemoList() {
@@ -2648,7 +2668,7 @@ function renderDragLayer() {
 }
 
 function clearDragTargets() {
-  document.querySelectorAll(".drag-over, .drag-source, .drag-before, .folder-before, .folder-after").forEach((el) => el.classList.remove("drag-over", "drag-source", "drag-before", "folder-before", "folder-after"));
+  document.querySelectorAll(".drag-over, .drag-source, .drag-before, .drag-after, .folder-before, .folder-after").forEach((el) => el.classList.remove("drag-over", "drag-source", "drag-before", "drag-after", "folder-before", "folder-after"));
 }
 
 function beginMemoDrag(noteCard, event) {
@@ -2785,10 +2805,13 @@ function updateMemoDrag(event) {
   }
   if (folderCard) folderCard.classList.add("drag-over");
   if (noteCard && noteCard.dataset.longNote !== ui.drag.noteId) {
-    noteCard.classList.add("drag-before");
-    if (ui.drag.overNoteId !== noteCard.dataset.longNote) {
-      ui.drag.overNoteId = noteCard.dataset.longNote;
-      if (reorderNoteBefore(ui.drag.noteId, ui.drag.overNoteId)) {
+    const rect = noteCard.getBoundingClientRect();
+    const placeAfter = event.clientY > rect.top + rect.height / 2;
+    noteCard.classList.add(placeAfter ? "drag-after" : "drag-before");
+    const marker = `${noteCard.dataset.longNote}:${placeAfter ? "after" : "before"}`;
+    if (ui.drag.overNoteId !== marker) {
+      ui.drag.overNoteId = marker;
+      if (reorderNoteBefore(ui.drag.noteId, noteCard.dataset.longNote, placeAfter)) {
         ui.drag.didReorder = true;
         refreshCurrentMemoList();
         renderDragLayer();
@@ -3357,7 +3380,7 @@ app.addEventListener("pointermove", (event) => {
     const threshold = WHEEL_STEP_PX / speed;
     if (Math.abs(dy) >= threshold) {
       const steps = Math.max(1, Math.floor(Math.abs(dy) / threshold));
-      stepWheel(ui.wheelTouch.key, (dy > 0 ? 1 : -1) * steps);
+      stepWheel(ui.wheelTouch.key, (dy > 0 ? -1 : 1) * steps);
       tickWheelHaptic();
       ui.wheelTouch.lastY = event.clientY;
     }
@@ -3480,9 +3503,15 @@ function finishSplash() {
   }, 1000);
 }
 
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  if (archiveIosDueNotes()) render();
+});
+
 async function boot() {
   try {
     await load();
+    archiveIosDueNotes();
     await initializeIosNotifications();
     syncNativeAlarms();
     render();

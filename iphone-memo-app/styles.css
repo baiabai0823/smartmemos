@@ -2906,6 +2906,22 @@ button {
   background: var(--gold);
   box-shadow: 0 0 18px rgba(212, 175, 55, 0.5);
 }
+
+.note-card.drag-after {
+  transform: translateY(-8px);
+}
+
+.note-card.drag-after::after {
+  content: "";
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: -5px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--gold);
+  box-shadow: 0 0 18px rgba(212, 175, 55, 0.5);
+}
 /* Request polish pass 19 */
 .note-card,
 .folder-card {
