@@ -9,8 +9,7 @@ app_target = project.targets.find { |target| target.name == "App" }
 abort("Capacitor App target was not found") unless app_target
 
 project.targets.select { |target| target.name == "SmartMemoNotification" }.each(&:remove_from_project)
-extension_target = project.new_target(:app_extension, "SmartMemoNotification", :ios, "14.0")
-extension_target.product_name = "SmartMemoNotification"
+extension_target = project.new_target(:app_extension, "SmartMemoNotification", :ios, "14.0", "SmartMemoNotification")
 
 group = project.main_group.new_group("SmartMemoNotification", "../../native/SmartMemoNotification")
 swift_ref = group.new_file("NotificationViewController.swift")
@@ -22,6 +21,7 @@ extension_target.resources_build_phase.add_file_reference(storyboard_ref)
 extension_target.build_configurations.each do |configuration|
   settings = configuration.build_settings
   settings["PRODUCT_BUNDLE_IDENTIFIER"] = "com.baiabai.smartmemo.notification"
+  settings["PRODUCT_NAME"] = "SmartMemoNotification"
   settings["INFOPLIST_FILE"] = "../../native/SmartMemoNotification/Info.plist"
   settings["SWIFT_VERSION"] = "5.0"
   settings["TARGETED_DEVICE_FAMILY"] = "1"
