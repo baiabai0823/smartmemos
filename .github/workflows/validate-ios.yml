@@ -2,6 +2,13 @@ name: Validate SmartMemo iOS
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - codex/ios-reminder-notifications
+    paths:
+      - "iphone-memo-app/**"
+      - "release/SmartMemo-iOS/**"
+      - ".github/workflows/validate-ios.yml"
 
 permissions:
   contents: read
