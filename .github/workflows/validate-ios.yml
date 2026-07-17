@@ -56,8 +56,8 @@ jobs:
         run: |
           PLIST="release/SmartMemo-iOS/ios/App/App/Info.plist"
           /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName SmartMemo" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.1.0" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 2" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.1.1" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 3" "$PLIST"
 
       - name: Validate Xcode build
         shell: bash

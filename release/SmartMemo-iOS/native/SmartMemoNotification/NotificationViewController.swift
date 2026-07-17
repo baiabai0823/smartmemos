@@ -11,6 +11,12 @@ final class NotificationViewController: UIViewController, UNNotificationContentE
     private let timePanel = UIView()
     private let accentBar = UIView()
 
+    override func loadView() {
+        let rootView = UIView(frame: .zero)
+        rootView.backgroundColor = .clear
+        view = rootView
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         buildInterface()

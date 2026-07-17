@@ -13,10 +13,8 @@ extension_target = project.new_target(:app_extension, "SmartMemoNotification", :
 
 group = project.main_group.new_group("SmartMemoNotification", "../../native/SmartMemoNotification")
 swift_ref = group.new_file("NotificationViewController.swift")
-storyboard_ref = group.new_file("MainInterface.storyboard")
 group.new_file("Info.plist")
 extension_target.source_build_phase.add_file_reference(swift_ref)
-extension_target.resources_build_phase.add_file_reference(storyboard_ref)
 
 extension_target.build_configurations.each do |configuration|
   settings = configuration.build_settings
@@ -30,8 +28,8 @@ extension_target.build_configurations.each do |configuration|
   settings["GENERATE_INFOPLIST_FILE"] = "NO"
   settings["SKIP_INSTALL"] = "YES"
   settings["CODE_SIGN_STYLE"] = "Automatic"
-  settings["MARKETING_VERSION"] = "1.1.0"
-  settings["CURRENT_PROJECT_VERSION"] = "2"
+  settings["MARKETING_VERSION"] = "1.1.1"
+  settings["CURRENT_PROJECT_VERSION"] = "3"
 end
 
 app_target.add_dependency(extension_target)

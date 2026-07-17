@@ -4085,3 +4085,20 @@ html.ios-native .dock-item .ui-icon {
   width: 26px !important;
   height: 26px !important;
 }
+html.ios-native .dock-add {
+  display: grid !important;
+  place-items: center !important;
+  padding: 0 !important;
+  font-size: 0 !important;
+  line-height: 0 !important;
+}
+
+html.ios-native .dock-add::before {
+  content: "+";
+  display: block;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif;
+  font-size: 40px;
+  font-weight: 500;
+  line-height: 1;
+  transform: translateY(-1px);
+}

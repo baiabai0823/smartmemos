@@ -1960,8 +1960,7 @@ async function initializeIosNotifications() {
       if (!note) return;
       if (event.actionId === "COMPLETE_MEMO") return stopAlarm(note.id);
       if (event.actionId === "SNOOZE_10") return snoozeAlarm(note.id);
-      ui.unlockedNotes.add(note.id);
-      setView("editor", { noteId: note.id, folderId: note.folderId || null });
+      openReminderFromNotification(note);
     });
   } catch (error) {
     addDiagnosticLog("reminder.ios.initialize.failed", { error: safeErrorSummary(error) });
@@ -2067,9 +2066,12 @@ function saveReminder(form) {
 function archiveHistory(type, note, extra = {}) {
   if (type === "version") return;
   if (!note) return;
-  if (type === "expired" && extra.reminderId && state.history.some((entry) => entry.reminderId === extra.reminderId)) return;
+  const existing = type === "expired" && extra.reminderId
+    ? state.history.find((entry) => entry.reminderId === extra.reminderId)
+    : null;
+  if (existing) return existing.id;
   const folder = state.folders.find((item) => item.id === note.folderId);
-  state.history.unshift({
+  const entry = {
     id: uid("history"),
     type,
     reminderId: extra.reminderId || null,
@@ -2087,10 +2089,38 @@ function archiveHistory(type, note, extra = {}) {
       createdAt: note.createdAt,
       updatedAt: note.updatedAt
     }
-  });
+  };
+  state.history.unshift(entry);
   state.history = state.history.slice(0, 200);
+  return entry.id;
 }
 
+function openReminderFromNotification(note) {
+  const reminder = note?.reminder;
+  if (!note || !reminder) return;
+  if (Number(reminder.fireAt) > Date.now()) {
+    ui.unlockedNotes.add(note.id);
+    setView("editor", { noteId: note.id, folderId: note.folderId || null });
+    return;
+  }
+
+  cancelNativeAlarm(reminder.id);
+  clearNativeAlarmAlert(reminder.id);
+  const historyId = archiveHistory("expired", note, {
+    reminderId: reminder.id,
+    occurredAt: new Date(reminder.fireAt).toISOString()
+  });
+  state.notes = state.notes.filter((item) => item.id !== note.id);
+  delete plainPasswords.notes[note.id];
+  delete plainPasswords.recovery.notes[note.id];
+  ui.unlockedNotes.delete(note.id);
+  scheduleSave();
+  setView("history", {
+    noteId: null,
+    folderId: null,
+    modal: { type: "historyDetail", id: historyId }
+  });
+}
 function deleteNote(id) {
   const note = state.notes.find((item) => item.id === id);
   const stayFolderId = ui.view === "folder" ? ui.folderId : note?.folderId || null;
