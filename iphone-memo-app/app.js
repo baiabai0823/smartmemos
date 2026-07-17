@@ -554,6 +554,15 @@ function lockFolderScopedNotes(folderId) {
 }
 
 function setView(view, patch = {}) {
+  if (IS_NATIVE_IOS && view === "editor" && patch.noteId) {
+    const note = state.notes.find((item) => item.id === patch.noteId);
+    const historyId = archiveDueNote(note);
+    if (historyId) {
+      ui = { ...ui, view: "history", noteId: null, folderId: null, modal: { type: "historyDetail", id: historyId } };
+      render();
+      return;
+    }
+  }
   const previousFolderId = ui.folderId;
   if (view === "home" && previousFolderId) lockFolderScopedNotes(previousFolderId);
   ui = { ...ui, view, ...patch };
@@ -1029,8 +1038,8 @@ function renderImageManager(note) {
             <div class="image-row">
               <img src="${src}" alt="memo image ${index + 1}" />
               <div>
-                <strong>鍥剧墖 ${index + 1}</strong>
-                <span>鍙瑙堛€佸垹闄ゃ€佽皟鏁翠綅缃?/span>
+                <strong>Image ${index + 1}</strong>
+                <span>Preview, Delete, Or Reorder.</span>
               </div>
               <div class="icon-row">
                 <button class="icon-btn" data-action="move-image-up" data-id="${id}" title="Move Up">${icon.moveUp}</button>
@@ -1170,7 +1179,7 @@ function modalHtml(modal) {
     return `
       <div class="modal history-detail-modal">
         <h3>${escapeHtml(note.title || "Memo")}</h3>
-        <p class="muted">${escapeHtml(entry?.type === "expired" ? "Expired" : "Deleted")} 路 ${fmtTime(entry?.occurredAt)}</p>
+        <p class="muted">${escapeHtml(entry?.type === "expired" ? "Expired" : "Deleted")} - ${fmtTime(entry?.occurredAt)}</p>
         <div class="history-body">${sanitizeHtml(note.bodyHtml || "No Body")}</div>
         <div class="modal-actions">
           <button class="small-btn gold icon-only restore-btn" data-action="restore-history" data-id="${modal.id}" title="Restore">${icon.restore}</button>
@@ -1418,7 +1427,7 @@ function modalHtml(modal) {
   if (modal.type === "result") {
     return `
       <div class="modal result-modal ${modal.status || "success"}">
-        <h3>${escapeHtml(modal.title || "瀹屾垚")}</h3>
+        <h3>${escapeHtml(modal.title || "Complete")}</h3>
         <p class="muted">${escapeHtml(modal.message || "")}</p>
         ${modal.path ? `<p class="export-path">${escapeHtml(modal.path)}</p>` : ""}
         <div class="modal-actions"><button class="small-btn gold" data-action="close-modal">Done</button></div>
@@ -2095,15 +2104,9 @@ function archiveHistory(type, note, extra = {}) {
   return entry.id;
 }
 
-function openReminderFromNotification(note) {
+function archiveDueNote(note) {
   const reminder = note?.reminder;
-  if (!note || !reminder) return;
-  if (Number(reminder.fireAt) > Date.now()) {
-    ui.unlockedNotes.add(note.id);
-    setView("editor", { noteId: note.id, folderId: note.folderId || null });
-    return;
-  }
-
+  if (!note || !reminder || Number(reminder.fireAt) > Date.now()) return null;
   cancelNativeAlarm(reminder.id);
   clearNativeAlarmAlert(reminder.id);
   const historyId = archiveHistory("expired", note, {
@@ -2115,6 +2118,17 @@ function openReminderFromNotification(note) {
   delete plainPasswords.recovery.notes[note.id];
   ui.unlockedNotes.delete(note.id);
   scheduleSave();
+  return historyId;
+}
+
+function openReminderFromNotification(note) {
+  if (!note?.reminder) return;
+  const historyId = archiveDueNote(note);
+  if (!historyId) {
+    ui.unlockedNotes.add(note.id);
+    setView("editor", { noteId: note.id, folderId: note.folderId || null });
+    return;
+  }
   setView("history", {
     noteId: null,
     folderId: null,
