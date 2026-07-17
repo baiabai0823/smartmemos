@@ -1,9 +1,12 @@
-﻿# Keep this repository focused on the SmartMemo app source and release artifacts.
+# Keep this repository focused on the SmartMemo app source and release artifacts.
 *
 
 !.gitignore
 !.gitattributes
 !smartmemo.md
+!.github/
+!.github/workflows/
+!.github/workflows/*.yml
 
 !iphone-memo-app/
 !iphone-memo-app/**
@@ -12,11 +15,22 @@
 !release/SmartMemo-debug.apk
 !release/SmartMemo-Android/
 !release/SmartMemo-Android/**
+!release/SmartMemo-iOS/
+!release/SmartMemo-iOS/package.json
+!release/SmartMemo-iOS/package-lock.json
+!release/SmartMemo-iOS/capacitor.config.json
+!release/SmartMemo-iOS/native/
+!release/SmartMemo-iOS/native/**
+!release/SmartMemo-iOS/scripts/
+!release/SmartMemo-iOS/scripts/**
 
 # Build output and local tooling
 release/SmartMemo-Android/.gradle/
 release/SmartMemo-Android/build/
 release/SmartMemo-Android/app/build/
+release/SmartMemo-iOS/node_modules/
+release/SmartMemo-iOS/ios/
+release/SmartMemo-iOS/www/
 release/*.zip
 release/SmartMemo-iPhone-webapp/
 tools/
