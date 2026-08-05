@@ -762,6 +762,11 @@ function renderFolderCard(folder) {
   `;
 }
 
+function renderNoteImageMeta(imageCount) {
+  if (!IS_NATIVE_IOS) return "<span>" + (imageCount ? imageCount + " Images" : "") + "</span>";
+  return '<span class="note-image-meta">' + icon.image + "<span>" + imageCount + " Images</span></span>";
+}
+
 function renderNoteCard(note) {
   const accessible = noteIsAccessible(note);
   const excerpt = accessible ? textFromHtml(note.bodyHtml) || "No Body" : "Enter Password";
@@ -781,7 +786,7 @@ function renderNoteCard(note) {
         </div>
         <p class="excerpt">${escapeHtml(excerpt)}</p>
         <div class="meta">
-          <span>${imageCount ? `${imageCount} Images` : ""}</span>
+          ${renderNoteImageMeta(imageCount)}
           <span>Saved ${fmtTime(note.updatedAt)}</span>
         </div>
       </div>
@@ -1589,6 +1594,7 @@ function createNote(folderId = null) {
     updatedAt: nowIso()
   };
   state.notes.unshift(note);
+  if (IS_NATIVE_IOS) promoteNoteToTop(note);
   if (folderId) touchFolder(folderId);
   ui.modal = null;
   ui.unlockedNotes.add(note.id);
@@ -1718,8 +1724,29 @@ function updateCurrentNote(patch) {
   if (!note) return;
   snapshotNoteVersion(note);
   Object.assign(note, patch, { updatedAt: nowIso() });
+  if (IS_NATIVE_IOS) promoteNoteToTop(note);
   if (note.folderId) touchFolder(note.folderId);
   setSaveStatus("typing");
+  scheduleSave();
+}
+
+function promoteNoteToTop(note) {
+  if (!note) return;
+  const siblings = notesFor(folderKey(note.folderId)).filter((item) => item.id !== note.id);
+  assignNoteOrder(note.folderId || null, [note.id, ...siblings.map((item) => item.id)]);
+}
+
+function migrateIosActivityOrder() {
+  if (!IS_NATIVE_IOS || Number(state.settings.iosActivityOrderVersion || 0) >= 1) return;
+  const folderIds = new Set([null, ...state.notes.map((note) => note.folderId || null)]);
+  folderIds.forEach((folderId) => {
+    const orderedIds = state.notes
+      .filter((note) => (note.folderId || null) === folderId)
+      .sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0))
+      .map((note) => note.id);
+    assignNoteOrder(folderId, orderedIds);
+  });
+  state.settings.iosActivityOrderVersion = 1;
   scheduleSave();
 }
 
@@ -2252,6 +2279,7 @@ function restoreHistory(id, options = {}) {
     updatedAt: nowIso()
   };
   state.notes.unshift(note);
+  if (IS_NATIVE_IOS) promoteNoteToTop(note);
   state.history = state.history.filter((item) => item.id !== id);
   ui.unlockedNotes.add(note.id);
   ui.modal = null;
@@ -3295,8 +3323,37 @@ app.addEventListener("input", (event) => {
     return;
   }
   if (action === "edit-title") updateCurrentNote({ title: target.value });
-  if (action === "edit-body") updateCurrentNote({ bodyHtml: sanitizeHtml(target.innerHTML) });
+  if (action === "edit-body") {
+    updateCurrentNote({ bodyHtml: sanitizeHtml(target.innerHTML) });
+    keepEditorCaretVisible();
+  }
 });
+
+function keepEditorCaretVisible() {
+  if (!IS_NATIVE_IOS) return;
+  requestAnimationFrame(() => {
+    const body = document.querySelector(".editor-body");
+    const scroller = document.querySelector(".memo-scroll-content");
+    const selection = window.getSelection();
+    if (!body || !scroller || !selection?.rangeCount || !selection.isCollapsed) return;
+    const range = selection.getRangeAt(0);
+    if (!body.contains(range.startContainer)) return;
+    const rects = range.getClientRects();
+    const caretRect = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect();
+    const viewport = window.visualViewport;
+    const visibleTop = viewport?.offsetTop || 0;
+    const visibleBottom = visibleTop + (viewport?.height || window.innerHeight);
+    const bottomGuard = Math.min(96, Math.max(48, (viewport?.height || window.innerHeight) * 0.12));
+    if (caretRect.bottom > visibleBottom - bottomGuard) {
+      scroller.scrollTop += caretRect.bottom - (visibleBottom - bottomGuard);
+    } else if (caretRect.top < visibleTop + 24) {
+      scroller.scrollTop -= visibleTop + 24 - caretRect.top;
+    }
+  });
+}
+
+window.visualViewport?.addEventListener("resize", keepEditorCaretVisible);
+window.visualViewport?.addEventListener("scroll", keepEditorCaretVisible);
 
 imagePicker.addEventListener("change", async () => {
   await addImages([...imagePicker.files]);
@@ -3356,7 +3413,7 @@ app.addEventListener("pointerdown", (event) => {
     const note = state.notes.find((item) => item.id === noteCard.dataset.longNote);
     if (note?.hasPassword && !ui.unlockedNotes.has(note.id)) return;
     ui.pendingDrag = { type: "note", noteCard, startX: event.clientX, startY: event.clientY };
-    ui.notePan = { scroll: noteCard.closest(".scroll"), startX: event.clientX, startY: event.clientY, lastY: event.clientY, moved: false };
+    ui.notePan = IS_NATIVE_IOS ? null : { scroll: noteCard.closest(".scroll"), startX: event.clientX, startY: event.clientY, lastY: event.clientY, moved: false };
   }
   if (folderCard && !noteCard) {
     const folder = state.folders.find((item) => item.id === folderCard.dataset.longFolder);
@@ -3511,6 +3568,7 @@ document.addEventListener("visibilitychange", () => {
 async function boot() {
   try {
     await load();
+    migrateIosActivityOrder();
     archiveIosDueNotes();
     await initializeIosNotifications();
     syncNativeAlarms();

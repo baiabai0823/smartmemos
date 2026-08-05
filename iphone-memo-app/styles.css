@@ -4118,3 +4118,29 @@ html.ios-native .dock-add::before {
   line-height: 1;
   transform: translateY(-1px);
 }
+/* iOS memo list metadata and native momentum scrolling */
+html.ios-native .note-card .meta {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  align-items: center !important;
+  min-height: 20px;
+}
+
+html.ios-native .note-image-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+html.ios-native .note-image-meta > svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+}
+
+html.ios-native .screen > .scroll {
+  -webkit-overflow-scrolling: touch !important;
+  overscroll-behavior-y: auto !important;
+  touch-action: pan-y !important;
+}
