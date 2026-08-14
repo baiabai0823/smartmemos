@@ -1,0 +1,92 @@
+name: Build SmartMemo Interaction Test IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/ios-interaction-test
+    paths:
+      - "iphone-memo-app-swipe-test/**"
+      - ".github/workflows/build-ios-interaction-test.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-unsigned-ipa:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: release/SmartMemo-iOS/package-lock.json
+
+      - name: Validate web source
+        run: node --check iphone-memo-app-swipe-test/app.js
+
+      - name: Prepare isolated web assets
+        shell: bash
+        run: |
+          rm -rf release/SmartMemo-iOS/www
+          mkdir -p release/SmartMemo-iOS/www
+          cp -R iphone-memo-app-swipe-test/. release/SmartMemo-iOS/www/
+
+      - name: Install Capacitor
+        working-directory: release/SmartMemo-iOS
+        run: npm ci
+
+      - name: Create native iOS project
+        working-directory: release/SmartMemo-iOS
+        run: |
+          npx cap add ios
+          npx cap sync ios
+
+      - name: Configure test application
+        shell: bash
+        run: |
+          PLIST="release/SmartMemo-iOS/ios/App/App/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName SmartMemo Test" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.1.5" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 7" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :ITSAppUsesNonExemptEncryption bool false" "$PLIST" || true
+          /usr/libexec/PlistBuddy -c "Add :NSPhotoLibraryUsageDescription string SmartMemo uses selected photos only when you insert them into a memo." "$PLIST" || true
+
+      - name: Build unsigned archive
+        shell: bash
+        run: |
+          cd release/SmartMemo-iOS/ios/App
+          xcodebuild \
+            -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath "$RUNNER_TEMP/SmartMemoInteractionTest.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            archive
+
+      - name: Create and verify unsigned IPA
+        shell: bash
+        run: |
+          APP_PATH="$RUNNER_TEMP/SmartMemoInteractionTest.xcarchive/Products/Applications/App.app"
+          test -d "$APP_PATH"
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/SmartMemo.app"
+          cd "$RUNNER_TEMP"
+          /usr/bin/zip -qry "$GITHUB_WORKSPACE/SmartMemo-Interaction-Test-unsigned.ipa" Payload
+          /usr/bin/unzip -t "$GITHUB_WORKSPACE/SmartMemo-Interaction-Test-unsigned.ipa"
+          shasum -a 256 "$GITHUB_WORKSPACE/SmartMemo-Interaction-Test-unsigned.ipa" > "$GITHUB_WORKSPACE/SmartMemo-Interaction-Test-unsigned.ipa.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SmartMemo-iOS-Interaction-Test
+          path: |
+            SmartMemo-Interaction-Test-unsigned.ipa
+            SmartMemo-Interaction-Test-unsigned.ipa.sha256
+          if-no-files-found: error
+          retention-days: 30
