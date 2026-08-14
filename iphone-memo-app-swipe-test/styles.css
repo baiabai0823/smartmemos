@@ -4273,3 +4273,85 @@ html.ios-native .folder-note-list .note-card * {
 .memo-screen .memo-scroll-content .editor-body {
   padding-bottom: calc(84px + var(--keyboard-inset, 0px)) !important;
 }
+
+/* SwipeActions-inspired single-piece glass reveal. */
+.note-swipe-shell {
+  isolation: isolate;
+  border-radius: 8px;
+}
+.note-swipe-shell::before,
+.note-swipe-shell::after {
+  content: "";
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  width: 28px;
+  z-index: 3;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+.note-swipe-shell.swipe-left::before {
+  left: 0;
+  opacity: 1;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--surface) 88%, transparent), transparent);
+}
+.note-swipe-shell.swipe-right::after {
+  right: 0;
+  opacity: 1;
+  background: linear-gradient(270deg, color-mix(in srgb, var(--surface) 88%, transparent), transparent);
+}
+.note-swipe-action {
+  width: 64px !important;
+  inset-block: 4px !important;
+  margin: 0 !important;
+  border: 1px solid color-mix(in srgb, #fff 46%, transparent);
+  border-radius: 7px !important;
+  backdrop-filter: blur(18px) saturate(1.22);
+  -webkit-backdrop-filter: blur(18px) saturate(1.22);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.56), 0 8px 22px rgba(35,30,22,.12);
+  cursor: default;
+  gap: 5px;
+}
+.note-swipe-pin {
+  background: color-mix(in srgb, var(--gold) 25%, rgba(255,255,255,.72)) !important;
+  color: var(--gold) !important;
+}
+.note-swipe-delete {
+  background: color-mix(in srgb, var(--danger) 76%, rgba(255,255,255,.18)) !important;
+}
+.note-swipe-delete.confirming {
+  width: 82px !important;
+  font-size: 10px;
+  text-transform: none;
+}
+.note-swipe-action > svg { flex: 0 0 17px; }
+.note-swipe-shell > .note-card {
+  border-radius: 8px !important;
+  will-change: transform;
+  backface-visibility: hidden;
+}
+.note-swipe-shell.swiping > .note-card { transition: none !important; }
+.swipe-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: rgba(246, 242, 234, .18);
+  backdrop-filter: blur(1.5px);
+  -webkit-backdrop-filter: blur(1.5px);
+}
+
+/* History uses native momentum scrolling; it has no long-press drag conflict. */
+.history-list,
+.history-list .history-card,
+.history-list .history-card * {
+  touch-action: pan-y !important;
+}
+.history-list { -webkit-overflow-scrolling: touch !important; }
+.history-screen > .scroll,
+.history-screen .scroll {
+  overflow-y: auto !important;
+  -webkit-overflow-scrolling: touch !important;
+  touch-action: pan-y !important;
+  overscroll-behavior-y: auto !important;
+}

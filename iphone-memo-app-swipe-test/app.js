@@ -108,6 +108,7 @@ let ui = {
   folderPan: null,
   notePan: null,
   noteMomentumFrame: null,
+  lastEditorInputAt: 0,
   swipe: null,
   suppressClick: false
 };
@@ -665,6 +666,15 @@ function render() {
   renderModal();
   renderAlarm();
   renderToast();
+  renderSwipeScrim();
+}
+
+function renderSwipeScrim() {
+  document.querySelector(".swipe-scrim")?.remove();
+  if (!ui.swipe?.noteId || !ui.swipe?.offset) return;
+  app.insertAdjacentHTML("beforeend", '<div class="swipe-scrim" data-action="close-swipe" aria-hidden="true"></div>');
+  const shell = document.querySelector(`[data-swipe-note="${ui.swipe.noteId}"]`);
+  if (shell) shell.style.zIndex = "91";
 }
 
 
@@ -784,7 +794,7 @@ function renderNoteCard(note) {
   return `
     <div class="note-swipe-shell ${swipeOpen ? "swipe-open" : ""} ${swipeRight ? "swipe-right" : ""} ${swipeLeft ? "swipe-left" : ""}" data-swipe-note="${note.id}">
       ${state.settings.cardInteraction === "swipe" ? `<div class="note-swipe-action note-swipe-pin" data-action="pin-note" data-id="${note.id}" aria-label="Pin Memo">${pinSvg()}</div>
-      <div class="note-swipe-action note-swipe-delete" data-action="${swipeConfirm ? "confirm-swipe-delete-note" : "swipe-delete-note"}" data-id="${note.id}" aria-label="${swipeConfirm ? "Confirm Delete Memo" : "Delete Memo"}">${swipeConfirm ? "Delete" : icon.trash}</div>` : ""}
+      <div class="note-swipe-action note-swipe-delete ${swipeConfirm ? "confirming" : ""}" data-action="${swipeConfirm ? "confirm-swipe-delete-note" : "swipe-delete-note"}" data-id="${note.id}" aria-label="${swipeConfirm ? "Confirm Delete Memo" : "Delete Memo"}">${swipeConfirm ? `<span>Confirm</span>${icon.trash}` : icon.trash}</div>` : ""}
       <button class="note-card ${dragging ? "dragging-placeholder" : ""} ${note.hasPassword ? "has-lock" : ""} ${note.pinnedAt ? "is-pinned" : ""} ${accessible ? "" : "is-locked"} ${armed ? "delete-armed" : ""}" style="--swipe-offset:${swipeOpen}px" data-action="open-note" data-id="${note.id}" data-long-note="${note.id}">
       ${note.pinnedAt ? `<span class="pin-mark" title="Pinned">${pinSvg()}</span>` : ""}
       <div class="note-card-content">
@@ -3141,19 +3151,25 @@ app.addEventListener("click", async (event) => {
   }
   if (action === "pin-note") {
     event.stopPropagation();
+    if (target.closest(".note-swipe-action")) ui.swipe = null;
     togglePin("note", id);
     return;
   }
   if (action === "swipe-delete-note") {
     event.stopPropagation();
-    ui.swipe = { noteId: id, offset: -76, confirmId: id };
+    ui.swipe = { noteId: id, offset: -82, confirmId: id };
     renderPreservingScroll();
     return;
   }
   if (action === "confirm-swipe-delete-note") {
     event.stopPropagation();
-    deleteNote(id);
     ui.swipe = null;
+    deleteNote(id);
+    return;
+  }
+  if (action === "close-swipe") {
+    ui.swipe = null;
+    renderPreservingScroll();
     return;
   }
 if (action === "back") {
@@ -3404,12 +3420,14 @@ app.addEventListener("input", (event) => {
   if (action === "edit-title") updateCurrentNote({ title: target.value });
   if (action === "edit-body") {
     updateCurrentNote({ bodyHtml: sanitizeHtml(target.innerHTML) });
-    keepEditorCaretVisible();
+    ui.lastEditorInputAt = Date.now();
+    keepEditorCaretVisible(true);
   }
 });
 
-function keepEditorCaretVisible() {
+function keepEditorCaretVisible(force = false) {
   if (!IS_NATIVE_IOS) return;
+  if (!force && Date.now() - ui.lastEditorInputAt > 350) return;
   const run = () => requestAnimationFrame(() => {
     const body = document.querySelector(".editor-body");
     const scroller = document.querySelector(".memo-scroll-content");
@@ -3442,8 +3460,8 @@ function keepEditorCaretVisible() {
   ui.caretFollowTimer = setTimeout(run, 90);
 }
 
-window.visualViewport?.addEventListener("resize", keepEditorCaretVisible);
-window.visualViewport?.addEventListener("scroll", keepEditorCaretVisible);
+window.visualViewport?.addEventListener("resize", () => keepEditorCaretVisible(false));
+window.visualViewport?.addEventListener("scroll", () => keepEditorCaretVisible(false));
 
 imagePicker.addEventListener("change", async () => {
   await addImages([...imagePicker.files]);
@@ -3465,13 +3483,15 @@ backupPicker.addEventListener("change", async () => {
   }
 });
 app.addEventListener("click", (event) => {
-  if (ui.suppressClick) {
+  const swipeAction = event.target.closest(".note-swipe-action");
+  if (swipeAction) ui.suppressClick = false;
+  if (ui.suppressClick && !swipeAction) {
     event.preventDefault();
     event.stopImmediatePropagation();
     ui.suppressClick = false;
     return;
   }
-  if (ui.swipe?.noteId && !event.target.closest(".note-swipe-action")) {
+  if (ui.swipe?.noteId && !swipeAction) {
     ui.swipe = null;
     renderPreservingScroll();
     event.preventDefault();
@@ -3581,34 +3601,40 @@ app.addEventListener("pointermove", (event) => {
       clearTimeout(ui.pressTimer);
       ui.pendingDrag = null;
       ui.swipe = null;
-      return;
     }
-    if (ui.swipe.axis === "x") {
+    else if (ui.swipe?.axis === "x") {
       clearTimeout(ui.pressTimer);
       ui.pendingDrag = null;
       ui.swipe.moved = true;
-      ui.swipe.offset = Math.max(-92, Math.min(92, sx));
+      ui.swipe.offset = Math.max(-82, Math.min(82, sx));
       const shell = document.querySelector(`[data-swipe-note="${ui.swipe.noteId}"]`);
       const card = shell?.querySelector(".note-card");
+      if (shell) {
+        shell.classList.add("swiping");
+        shell.classList.toggle("swipe-left", ui.swipe.offset < 0);
+        shell.classList.toggle("swipe-right", ui.swipe.offset > 0);
+      }
       if (card) card.style.setProperty("--swipe-offset", `${ui.swipe.offset}px`);
       event.preventDefault();
       return;
     }
   }
   if (ui.notePan && !ui.longPressNoteId && !ui.longPressFolderId) {
-    const panDx = event.clientX - ui.notePan.startX;
-    const panDy = event.clientY - ui.notePan.startY;
+    const samples = event.getCoalescedEvents?.() || [event];
+    const sample = samples[samples.length - 1] || event;
+    const panDx = sample.clientX - ui.notePan.startX;
+    const panDy = sample.clientY - ui.notePan.startY;
     if (Math.abs(panDy) > 8 && Math.abs(panDy) > Math.abs(panDx)) {
       clearTimeout(ui.pressTimer);
       ui.notePan.moved = true;
       ui.pendingDrag = null;
       event.preventDefault();
       const now = performance.now();
-      const delta = event.clientY - ui.notePan.lastY;
+      const delta = sample.clientY - ui.notePan.lastY;
       const elapsed = Math.max(8, now - ui.notePan.lastTime);
       if (ui.notePan.scroll) ui.notePan.scroll.scrollTop -= delta;
       ui.notePan.velocity = (-delta / elapsed) * 0.75 + ui.notePan.velocity * 0.25;
-      ui.notePan.lastY = event.clientY;
+      ui.notePan.lastY = sample.clientY;
       ui.notePan.lastTime = now;
       return;
     }
@@ -3642,8 +3668,9 @@ app.addEventListener("pointerup", (event) => {
   if (ui.swipe?.moved) {
     ui.suppressClick = true;
     if (Math.abs(ui.swipe.offset) < 58) ui.swipe = null;
-    else ui.swipe.offset = ui.swipe.offset > 0 ? 76 : -76;
+    else ui.swipe.offset = ui.swipe.offset > 0 ? 64 : -64;
     renderPreservingScroll();
+    setTimeout(() => { ui.suppressClick = false; }, 140);
   }
   if (ui.notePan?.moved && ui.notePan.scroll && Math.abs(ui.notePan.velocity) > 0.05) {
     const scroll = ui.notePan.scroll;
@@ -3653,13 +3680,16 @@ app.addEventListener("pointerup", (event) => {
       const elapsed = Math.min(32, now - previous);
       previous = now;
       scroll.scrollTop += velocity * elapsed;
-      velocity *= Math.pow(0.92, elapsed / 16);
+      velocity *= Math.pow(0.95, elapsed / 16);
       if (Math.abs(velocity) > 0.025) ui.noteMomentumFrame = requestAnimationFrame(glide);
       else ui.noteMomentumFrame = null;
     };
     ui.noteMomentumFrame = requestAnimationFrame(glide);
   }
-  if (ui.folderPan?.moved || ui.notePan?.moved) ui.suppressClick = true;
+  if (ui.folderPan?.moved || ui.notePan?.moved) {
+    ui.suppressClick = true;
+    setTimeout(() => { ui.suppressClick = false; }, 140);
+  }
   ui.folderPan = null;
   ui.notePan = null;
   ui.pendingDrag = null;
@@ -3704,7 +3734,6 @@ function applyUrlUnlock() {
 function armEditorSelectionTools() {
   const schedule = () => setTimeout(() => {
     saveSelection();
-    keepEditorCaretVisible();
   }, 0);
   document.addEventListener("selectionchange", () => {
     if (document.querySelector(".editor-body")) schedule();
@@ -3713,7 +3742,7 @@ function armEditorSelectionTools() {
   app.addEventListener("keyup", schedule);
   app.addEventListener("touchend", schedule, { passive: true });
   app.addEventListener("focusin", (event) => {
-    if (event.target?.matches?.(".editor-title, .editor-body")) keepEditorCaretVisible();
+    if (event.target?.matches?.(".editor-title, .editor-body")) keepEditorCaretVisible(true);
   });
 }
 function finishSplash() {
