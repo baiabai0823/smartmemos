@@ -3080,7 +3080,6 @@ app.addEventListener("click", async (event) => {
   const action = target.dataset.action;
   const id = target.dataset.id;
 
-  
   if (action === "wheel-step") {
     stepWheel(target.dataset.key, Number(target.dataset.dir));
     return;
