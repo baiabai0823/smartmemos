@@ -482,14 +482,14 @@ function renderReminderHealthCard() {
 }
 
 
-function showToast(message) {
+function showToast(message, duration = 1800) {
   ui.toast = { message };
   renderToast();
   clearTimeout(ui.toastTimer);
   ui.toastTimer = setTimeout(() => {
     ui.toast = null;
     renderToast();
-  }, 1800);
+  }, duration);
 }
 
 function renderToast() {
@@ -764,6 +764,7 @@ function renderFolderCard(folder) {
 
 function renderNoteImageMeta(imageCount) {
   if (!IS_NATIVE_IOS) return "<span>" + (imageCount ? imageCount + " Images" : "") + "</span>";
+  if (!imageCount) return '<span class="note-image-meta" aria-hidden="true"></span>';
   return '<span class="note-image-meta">' + icon.image + "<span>" + imageCount + " Images</span></span>";
 }
 
@@ -2696,7 +2697,23 @@ function renderDragLayer() {
 }
 
 function clearDragTargets() {
-  document.querySelectorAll(".drag-over, .drag-source, .drag-before, .drag-after, .folder-before, .folder-after").forEach((el) => el.classList.remove("drag-over", "drag-source", "drag-before", "drag-after", "folder-before", "folder-after"));
+  document.querySelectorAll(".drag-over, .drag-blocked, .drag-source, .drag-before, .drag-after, .folder-before, .folder-after").forEach((el) => el.classList.remove("drag-over", "drag-blocked", "drag-source", "drag-before", "drag-after", "folder-before", "folder-after"));
+}
+
+function folderAllowsMemoDrop(folderId) {
+  const folder = state.folders.find((item) => item.id === folderId);
+  return Boolean(folder) && (!folder.hasPassword || ui.unlockedFolders.has(folder.id));
+}
+
+function navigateMemoDragTo(targetFolderId) {
+  const drag = ui.drag;
+  if (!drag) return;
+  const isRoot = !targetFolderId || targetFolderId === "root";
+  ui.view = isRoot ? "home" : "folder";
+  ui.folderId = isRoot ? null : targetFolderId;
+  render();
+  ui.drag = drag;
+  renderDragLayer();
 }
 
 function beginMemoDrag(noteCard, event) {
@@ -2822,16 +2839,29 @@ function updateMemoDrag(event) {
   const folderCard = el?.closest?.("[data-long-folder]");
   const noteCard = el?.closest?.("[data-long-note]");
   const backButton = el?.closest?.('[data-action="back"]');
-  if (backButton && ui.view === "folder") {
-    const drag = ui.drag;
-    ui.view = "home";
-    ui.folderId = null;
-    render();
-    ui.drag = drag;
-    renderDragLayer();
+  const breadcrumbButton = el?.closest?.('[data-action="breadcrumb-folder"]');
+  if (breadcrumbButton && ui.view === "folder") {
+    const targetFolderId = breadcrumbButton.dataset.id;
+    if (targetFolderId !== ui.folderId) navigateMemoDragTo(targetFolderId);
     return;
   }
-  if (folderCard) folderCard.classList.add("drag-over");
+  if (backButton && ui.view === "folder") {
+    navigateMemoDragTo(currentFolder()?.parentId || "root");
+    return;
+  }
+  if (folderCard) {
+    const folderId = folderCard.dataset.longFolder;
+    if (folderAllowsMemoDrop(folderId)) {
+      folderCard.classList.add("drag-over");
+      ui.drag.blockedFolderId = null;
+    } else {
+      folderCard.classList.add("drag-blocked");
+      if (ui.drag.blockedFolderId !== folderId) {
+        ui.drag.blockedFolderId = folderId;
+        showToast("Unlock This Space Before Moving The Memo.", 2000);
+      }
+    }
+  }
   if (noteCard && noteCard.dataset.longNote !== ui.drag.noteId) {
     const rect = noteCard.getBoundingClientRect();
     const placeAfter = event.clientY > rect.top + rect.height / 2;
@@ -2869,7 +2899,11 @@ function finishMemoDrag(event) {
   const el = document.elementFromPoint(event.clientX, event.clientY);
   const folderCard = el?.closest?.("[data-long-folder]");
   let moved = false;
-  if (folderCard) moved = moveNoteToFolder(drag.noteId, folderCard.dataset.longFolder);
+  if (folderCard) {
+    const folderId = folderCard.dataset.longFolder;
+    if (folderAllowsMemoDrop(folderId)) moved = moveNoteToFolder(drag.noteId, folderId);
+    else showToast("Unlock This Space Before Moving The Memo.", 2000);
+  }
   ui.drag = null;
   ui.pendingDrag = null;
   ui.longPressNoteId = null;
@@ -3592,5 +3626,4 @@ async function boot() {
 armEditorSelectionTools();
 setInterval(checkAlarms, 1000);
 boot();
-
 

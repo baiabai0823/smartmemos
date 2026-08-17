@@ -4,6 +4,10 @@
 !.gitignore
 !.gitattributes
 !smartmemo.md
+!SMARTMEMO_CROSS_DEVICE_HANDOFF.md
+!setup-another-device.ps1
+!sync-smartmemo.ps1
+!verify-smartmemo.ps1
 !.github/
 !.github/workflows/
 !.github/workflows/*.yml
@@ -39,4 +43,3 @@ tools/
 Thumbs.db
 desktop.ini
 .DS_Store
-
