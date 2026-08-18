@@ -92,6 +92,7 @@ let ui = {
   alarm: null,
   saveTimer: null,
   wheelDraft: null,
+  reminderDraft: null,
   longPressFolderId: null,
   silentTimer: null,
   alarmVibrateTimer: null,
@@ -110,6 +111,7 @@ let ui = {
   noteMomentumFrame: null,
   lastEditorInputAt: 0,
   swipe: null,
+  swipeTap: null,
   suppressClick: false
 };
 
@@ -666,15 +668,6 @@ function render() {
   renderModal();
   renderAlarm();
   renderToast();
-  renderSwipeScrim();
-}
-
-function renderSwipeScrim() {
-  document.querySelector(".swipe-scrim")?.remove();
-  if (!ui.swipe?.noteId || !ui.swipe?.offset) return;
-  app.insertAdjacentHTML("beforeend", '<div class="swipe-scrim" data-action="close-swipe" aria-hidden="true"></div>');
-  const shell = document.querySelector(`[data-swipe-note="${ui.swipe.noteId}"]`);
-  if (shell) shell.style.zIndex = "91";
 }
 
 
@@ -793,8 +786,8 @@ function renderNoteCard(note) {
   const swipeLeft = swipeOpen < 0;
   return `
     <div class="note-swipe-shell ${swipeOpen ? "swipe-open" : ""} ${swipeRight ? "swipe-right" : ""} ${swipeLeft ? "swipe-left" : ""}" data-swipe-note="${note.id}">
-      ${state.settings.cardInteraction === "swipe" ? `<div class="note-swipe-action note-swipe-pin" data-action="pin-note" data-id="${note.id}" aria-label="Pin Memo">${pinSvg()}</div>
-      <div class="note-swipe-action note-swipe-delete ${swipeConfirm ? "confirming" : ""}" data-action="${swipeConfirm ? "confirm-swipe-delete-note" : "swipe-delete-note"}" data-id="${note.id}" aria-label="${swipeConfirm ? "Confirm Delete Memo" : "Delete Memo"}">${swipeConfirm ? `<span>Confirm</span>${icon.trash}` : icon.trash}</div>` : ""}
+      ${state.settings.cardInteraction === "swipe" ? `<button type="button" class="note-swipe-action note-swipe-pin" data-action="pin-note" data-id="${note.id}" aria-label="Pin Memo">${pinSvg()}</button>
+      <button type="button" class="note-swipe-action note-swipe-delete ${swipeConfirm ? "confirming" : ""}" data-action="${swipeConfirm ? "confirm-swipe-delete-note" : "swipe-delete-note"}" data-id="${note.id}" aria-label="${swipeConfirm ? "Confirm Delete Memo" : "Delete Memo"}">${swipeConfirm ? `<span>Confirm</span>${icon.trash}` : icon.trash}</button>` : ""}
       <button class="note-card ${dragging ? "dragging-placeholder" : ""} ${note.hasPassword ? "has-lock" : ""} ${note.pinnedAt ? "is-pinned" : ""} ${accessible ? "" : "is-locked"} ${armed ? "delete-armed" : ""}" style="--swipe-offset:${swipeOpen}px" data-action="open-note" data-id="${note.id}" data-long-note="${note.id}">
       ${note.pinnedAt ? `<span class="pin-mark" title="Pinned">${pinSvg()}</span>` : ""}
       <div class="note-card-content">
@@ -1398,17 +1391,28 @@ function modalHtml(modal) {
 
   if (modal.type === "reminder") {
     const note = state.notes.find((item) => item.id === modal.id);
-    const current = note?.reminder?.fireAt ? new Date(note.reminder.fireAt) : new Date(Date.now() + 15 * 60 * 1000);
+    const reminderDraft = ensureReminderDraft(note);
+    const current = reminderDraft.type === "repeat"
+      ? new Date(new Date().setHours(reminderDraft.hour, reminderDraft.minute, 0, 0))
+      : new Date(reminderDraft.fireAt);
     const parts = ensureWheelDraft(current);
     return `
       <form class="modal wheel-modal" data-action="save-reminder">
         <input type="hidden" name="id" value="${modal.id}" />
-        <h3>TIMER WHEEL</h3>
-        ${renderWheelPicker(parts)}
-        <div class="modal-actions">
-          <button class="small-btn danger" type="button" data-action="clear-reminder" data-id="${modal.id}">Clear</button>
-          <button class="small-btn gold" type="submit">Save</button>
+        <div class="reminder-sheet-head"><div><span>SMARTMEMO</span><h3>Reminder</h3></div><button class="reminder-save" type="submit">Save</button></div>
+        <span class="reminder-section-label">Reminder Type</span>
+        <div class="reminder-segmented">
+          ${["single", "deadline", "repeat"].map((type) => `<button type="button" class="${reminderDraft.type === type ? "active" : ""}" data-action="reminder-type" data-value="${type}">${capitalize(type)}</button>`).join("")}
         </div>
+        <div class="reminder-status-row">
+          <div><span>${reminderDraft.type === "deadline" ? "DUE DATE" : reminderDraft.type === "repeat" ? "REPEATING ALERT" : "ONE-TIME ALERT"}</span><strong>${formatReminderNext(reminderDraft)}</strong></div>
+          <button class="remove-reminder" type="button" data-action="clear-reminder" data-id="${modal.id}">Remove Reminder</button>
+        </div>
+        ${reminderDraft.type === "repeat" ? renderRepeatReminderControls(reminderDraft, parts) : `
+          <div class="reminder-wheel-panel">
+            ${renderWheelPicker(parts)}
+          </div>`}
+        <div class="reminder-next"><span class="reminder-next-icon">${icon.bell}</span><div><small>NEXT</small><strong>${formatReminderNext(reminderDraft)}</strong></div><em>China Time</em></div>
       </form>
     `;
   }
@@ -1521,17 +1525,85 @@ function renderWheelColumn(key, label, value, prev, next) {
   `;
 }
 
-function renderWheelPicker(parts) {
+function renderWheelPicker(parts, timeOnly = false) {
   const pad = (v) => String(v).padStart(2, "0");
   return `
-    <div class="wheel-picker" data-action="wheel-picker">
-      ${renderWheelColumn("year", "YEAR", parts.year, parts.year - 1, parts.year + 1)}
-      ${renderWheelColumn("month", "MONTH", pad(parts.month), pad(parts.month === 1 ? 12 : parts.month - 1), pad(parts.month === 12 ? 1 : parts.month + 1))}
-      ${renderWheelColumn("day", "DAY", pad(parts.day), pad(Math.max(1, parts.day - 1)), pad(Math.min(daysInMonth(parts.year, parts.month), parts.day + 1)))}
+    <div class="wheel-picker ${timeOnly ? "time-only" : ""}" data-action="wheel-picker">
+      ${timeOnly ? "" : renderWheelColumn("year", "YEAR", parts.year, parts.year - 1, parts.year + 1)}
+      ${timeOnly ? "" : renderWheelColumn("month", "MONTH", pad(parts.month), pad(parts.month === 1 ? 12 : parts.month - 1), pad(parts.month === 12 ? 1 : parts.month + 1))}
+      ${timeOnly ? "" : renderWheelColumn("day", "DAY", pad(parts.day), pad(Math.max(1, parts.day - 1)), pad(Math.min(daysInMonth(parts.year, parts.month), parts.day + 1)))}
       ${renderWheelColumn("hour", "HOUR", pad(parts.hour), pad((parts.hour + 23) % 24), pad((parts.hour + 1) % 24))}
       ${renderWheelColumn("min", "MIN", pad(parts.min), pad((parts.min + 59) % 60), pad((parts.min + 1) % 60))}
     </div>
     <input class="wheel-at" type="hidden" name="at" value="${parts.iso}" />
+  `;
+}
+
+function reminderType(reminder) {
+  return ["single", "deadline", "repeat"].includes(reminder?.type) ? reminder.type : "deadline";
+}
+
+function capitalize(value) {
+  const text = String(value || "");
+  return text ? text[0].toUpperCase() + text.slice(1).toLowerCase() : "";
+}
+
+function isDeadlineReminder(reminder) {
+  return Boolean(reminder) && reminderType(reminder) === "deadline";
+}
+
+function repeatWeekdays(reminder) {
+  if (reminder?.pattern === "daily") return [0, 1, 2, 3, 4, 5, 6];
+  if (reminder?.pattern === "weekdays") return [1, 2, 3, 4, 5];
+  return Array.isArray(reminder?.weekdays)
+    ? [...new Set(reminder.weekdays.map(Number).filter((day) => day >= 0 && day <= 6))]
+    : [];
+}
+
+function nextRepeatAt(reminder, from = Date.now()) {
+  const allowed = new Set(repeatWeekdays(reminder));
+  for (let offset = 0; offset < 8; offset += 1) {
+    const candidate = new Date(from);
+    candidate.setDate(candidate.getDate() + offset);
+    candidate.setHours(Number(reminder.hour) || 0, Number(reminder.minute) || 0, 0, 0);
+    if (allowed.has(candidate.getDay()) && candidate.getTime() > from) return candidate.getTime();
+  }
+  return 0;
+}
+
+function ensureReminderDraft(note) {
+  if (ui.reminderDraft) return ui.reminderDraft;
+  const existing = note?.reminder;
+  const type = existing ? reminderType(existing) : "single";
+  const seed = Number(existing?.fireAt) > Date.now() ? Number(existing.fireAt) : Date.now() + 15 * 60 * 1000;
+  const date = new Date(seed);
+  ui.reminderDraft = {
+    type,
+    fireAt: seed,
+    pattern: existing?.pattern || "daily",
+    hour: Number.isInteger(existing?.hour) ? existing.hour : date.getHours(),
+    minute: Number.isInteger(existing?.minute) ? existing.minute : date.getMinutes(),
+    weekdays: repeatWeekdays(existing).length ? repeatWeekdays(existing) : [1, 2, 3, 4, 5]
+  };
+  return ui.reminderDraft;
+}
+
+function formatReminderNext(reminder) {
+  const at = reminder.type === "repeat" ? nextRepeatAt(reminder) : Number(reminder.fireAt);
+  if (!at) return "Choose At Least One Day";
+  return new Intl.DateTimeFormat("en", {
+    weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false
+  }).format(at);
+}
+
+function renderRepeatReminderControls(draft, parts) {
+  const patterns = [["daily", "Every Day"], ["weekdays", "Weekdays"], ["custom", "Custom"]];
+  const days = [[1, "M"], [2, "T"], [3, "W"], [4, "T"], [5, "F"], [6, "S"], [0, "S"]];
+  return `
+    <span class="reminder-section-label repeat-label">Repeat Pattern</span>
+    <div class="reminder-segmented">${patterns.map(([value, label]) => `<button type="button" class="${draft.pattern === value ? "active" : ""}" data-action="reminder-pattern" data-value="${value}">${label}</button>`).join("")}</div>
+    ${draft.pattern === "custom" ? `<div class="reminder-weekdays">${days.map(([day, label]) => `<button type="button" class="${draft.weekdays.includes(day) ? "active" : ""}" data-action="reminder-weekday" data-value="${day}">${label}</button>`).join("")}</div>` : ""}
+    <div class="reminder-wheel-panel">${renderWheelPicker(parts, true)}</div>
   `;
 }
 
@@ -1557,6 +1629,14 @@ function stepWheel(key, dir) {
   if (key === "hour") date.setHours(date.getHours() + dir);
   if (key === "min") date.setMinutes(date.getMinutes() + dir);
   ui.wheelDraft = getWheelParts(clampWheelDate(date));
+  if (ui.reminderDraft) {
+    if (ui.reminderDraft.type === "repeat") {
+      ui.reminderDraft.hour = ui.wheelDraft.hour;
+      ui.reminderDraft.minute = ui.wheelDraft.min;
+    } else {
+      ui.reminderDraft.fireAt = wheelDateFromParts(ui.wheelDraft).getTime();
+    }
+  }
   render();
 }
 
@@ -1605,6 +1685,7 @@ function closeModal() {
   ui.longPressNoteId = null;
   ui.longPressFolderId = null;
   ui.wheelDraft = null;
+  ui.reminderDraft = null;
   render();
 }
 
@@ -1953,31 +2034,49 @@ function iosReminderCandidates() {
   const now = Date.now();
   const formatter = new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   return state.notes.flatMap((note) => {
-    if (!note.reminder?.id || Number(note.reminder.fireAt) <= now) return [];
-    const deadline = Number(note.reminder.fireAt);
-    return IOS_REMINDER_STAGES.map(([code, offset, remaining, content, level]) => ({
-      id: iosNotificationId(note.reminder.id, code),
-      triggerAt: deadline - offset,
+    const reminder = note.reminder;
+    if (!reminder?.id) return [];
+    const type = reminderType(reminder);
+    const title = String(note.title || "Memo Reminder").trim().slice(0, 42);
+    const base = (code, triggerAt, body, schedule, extra = {}) => ({
+      id: iosNotificationId(reminder.id, code),
+      triggerAt,
       notification: {
-        id: iosNotificationId(note.reminder.id, code),
-        title: String(note.title || "Memo Reminder").trim().slice(0, 42),
-        body: `${remaining}  -  Due ${formatter.format(deadline)}` + "\n" + content,
-        sound: "default",
-        threadIdentifier: `smartmemo-${note.reminder.id}`,
-        schedule: { at: new Date(deadline - offset) },
+        id: iosNotificationId(reminder.id, code), title, body, sound: "default",
+        threadIdentifier: `smartmemo-${reminder.id}`, schedule,
         actionTypeId: IOS_NOTIFICATION_ACTION_TYPE,
-        extra: {
-          reminderId: note.reminder.id,
-          noteId: note.id,
-          fireAt: deadline,
-          remaining,
-          deadline: formatter.format(deadline),
-          level,
-          content
-        }
+        extra: { reminderId: reminder.id, noteId: note.id, reminderType: type, ...extra }
       }
-    })).filter((item) => item.triggerAt > now + 1000);
+    });
+    if (type === "single") {
+      const at = Number(reminder.fireAt);
+      return at > now + 1000 ? [base("single", at, `Reminder  -  ${formatter.format(at)}`, { at: new Date(at) }, { fireAt: at })] : [];
+    }
+    if (type === "repeat") {
+      const recurring = repeatWeekdays(reminder).map((weekday) => {
+        const triggerAt = nextRepeatAt({ ...reminder, pattern: "custom", weekdays: [weekday] }, now);
+        return base(`repeat-${weekday}`, triggerAt, `Repeats  -  ${String(reminder.hour).padStart(2, "0")}:${String(reminder.minute).padStart(2, "0")}`,
+          { on: { weekday: weekday + 1, hour: reminder.hour, minute: reminder.minute }, repeats: true },
+          { fireAt: triggerAt, weekday });
+      }).filter((item) => item.triggerAt);
+      const snoozeAt = Number(reminder.snoozeAt);
+      if (snoozeAt > now + 1000) recurring.push(base("snooze", snoozeAt, "Snoozed Reminder", { at: new Date(snoozeAt) }, { fireAt: snoozeAt }));
+      return recurring;
+    }
+    const deadline = Number(reminder.fireAt);
+    if (deadline <= now) return [];
+    return IOS_REMINDER_STAGES.map(([code, offset, remaining, content, level]) => base(
+      code, deadline - offset,
+      `${remaining}  -  Due ${formatter.format(deadline)}\n${content}`,
+      { at: new Date(deadline - offset) },
+      { fireAt: deadline, remaining, deadline: formatter.format(deadline), level, content }
+    )).filter((item) => item.triggerAt > now + 1000);
   }).sort((a, b) => a.triggerAt - b.triggerAt).slice(0, IOS_NOTIFICATION_LIMIT);
+}
+
+function iosNotificationIdsForReminder(reminderId) {
+  const codes = IOS_REMINDER_STAGES.map(([code]) => code).concat("single", "snooze", [0, 1, 2, 3, 4, 5, 6].map((day) => `repeat-${day}`));
+  return codes.map((code) => ({ id: iosNotificationId(reminderId, code) }));
 }
 
 let iosNotificationSyncPromise = Promise.resolve();
@@ -2064,7 +2163,7 @@ function cancelNativeAlarm(reminderId) {
   }
   const plugin = iosNotificationsPlugin();
   if (plugin) {
-    const notifications = IOS_REMINDER_STAGES.map(([code]) => ({ id: iosNotificationId(reminderId, code) }));
+    const notifications = iosNotificationIdsForReminder(reminderId);
     plugin.cancel({ notifications }).finally(() => setTimeout(syncIosNotifications, 0));
   }
 }
@@ -2077,7 +2176,7 @@ function clearNativeAlarmAlert(reminderId) {
   }
   const plugin = iosNotificationsPlugin();
   if (!plugin) return;
-  const notifications = IOS_REMINDER_STAGES.map(([code]) => ({ id: iosNotificationId(reminderId, code) }));
+  const notifications = iosNotificationIdsForReminder(reminderId);
   plugin.removeDeliveredNotifications({ notifications }).catch(() => {});
 }
 function triggerAlarmForNote(note, reminder = note?.reminder) {
@@ -2119,17 +2218,31 @@ function saveReminder(form) {
   const data = Object.fromEntries(new FormData(form));
   const note = state.notes.find((item) => item.id === data.id);
   if (!note) return;
-  let fireAt = 0;
-  if (data.mode === "countdown") fireAt = Date.now() + Math.max(1, Number(data.minutes || 1)) * 60 * 1000;
-  else fireAt = new Date(data.at).getTime();
+  const draft = ensureReminderDraft(note);
+  const type = draft.type;
+  let fireAt = type === "repeat" ? nextRepeatAt(draft) : wheelDateFromParts(ui.wheelDraft).getTime();
+  if (!fireAt) {
+    showToast("Choose At Least One Day");
+    return;
+  }
   const previousReminderId = note.reminder?.id;
   if (previousReminderId) cancelNativeAlarm(previousReminderId);
-  note.reminder = { id: uid("alarm"), fireAt, createdAt: nowIso(), expiredArchived: false };
+  note.reminder = {
+    id: uid("alarm"), type, fireAt, createdAt: nowIso(), expiredArchived: false,
+    ...(type === "repeat" ? {
+      pattern: draft.pattern,
+      hour: draft.hour,
+      minute: draft.minute,
+      weekdays: draft.pattern === "custom" ? [...draft.weekdays] : repeatWeekdays(draft),
+      timezone: "Asia/Shanghai"
+    } : {})
+  };
   note.updatedAt = nowIso();
   ui.modal = null;
   scheduleNativeAlarm(note);
   setTimeout(checkAlarms, 250);
   ui.wheelDraft = null;
+  ui.reminderDraft = null;
   scheduleSave();
   render();
 }
@@ -2168,7 +2281,7 @@ function archiveHistory(type, note, extra = {}) {
 
 function archiveDueNote(note) {
   const reminder = note?.reminder;
-  if (!note || !reminder || Number(reminder.fireAt) > Date.now()) return null;
+  if (!note || !isDeadlineReminder(reminder) || Number(reminder.fireAt) > Date.now()) return null;
   cancelNativeAlarm(reminder.id);
   clearNativeAlarmAlert(reminder.id);
   const historyId = archiveHistory("expired", note, {
@@ -2185,14 +2298,14 @@ function archiveDueNote(note) {
 
 function archiveIosDueNotes() {
   if (!IS_NATIVE_IOS) return 0;
-  const dueNotes = state.notes.filter((note) => note.reminder && Number(note.reminder.fireAt) <= Date.now() - 3000);
+  const dueNotes = state.notes.filter((note) => isDeadlineReminder(note.reminder) && Number(note.reminder.fireAt) <= Date.now() - 3000);
   dueNotes.forEach(archiveDueNote);
   return dueNotes.length;
 }
 
 function openReminderFromNotification(note) {
   if (!note?.reminder) return;
-  const historyId = archiveDueNote(note);
+  const historyId = isDeadlineReminder(note.reminder) ? archiveDueNote(note) : null;
   if (!historyId) {
     ui.unlockedNotes.add(note.id);
     setView("editor", { noteId: note.id, folderId: note.folderId || null });
@@ -2209,6 +2322,7 @@ function deleteNote(id) {
   const stayFolderId = ui.view === "folder" ? ui.folderId : note?.folderId || null;
   ui.longPressNoteId = null;
   archiveHistory("deleted", note);
+  if (note?.reminder?.id) cancelNativeAlarm(note.reminder.id);
   state.notes = state.notes.filter((item) => item.id !== id);
   delete plainPasswords.notes[id];
   delete plainPasswords.recovery.notes[id];
@@ -2271,6 +2385,7 @@ function deleteFolder(id) {
   const folderIds = descendantFolderIds(id);
   const folderNotes = state.notes.filter((note) => folderIds.has(note.folderId));
   archiveFolderHistory(folder, folderNotes);
+  folderNotes.forEach((note) => { if (note.reminder?.id) cancelNativeAlarm(note.reminder.id); });
   state.notes = state.notes.filter((note) => !folderIds.has(note.folderId));
   folderNotes.forEach((note) => {
     delete plainPasswords.notes[note.id];
@@ -2555,7 +2670,7 @@ function checkAlarms() {
     if (archiveIosDueNotes()) render();
     return;
   }
-  const due = state.notes.find((note) => note.reminder && note.reminder.fireAt <= Date.now());
+  const due = state.notes.find((note) => note.reminder && reminderType(note.reminder) !== "repeat" && note.reminder.fireAt <= Date.now());
   triggerAlarmForNote(due);
 }
 
@@ -2563,7 +2678,8 @@ function snoozeAlarm(noteId) {
   const note = state.notes.find((item) => item.id === noteId);
   if (note?.reminder) {
     clearNativeAlarmAlert(note.reminder.id);
-    note.reminder.fireAt = Date.now() + 10 * 60 * 1000;
+    if (reminderType(note.reminder) === "repeat") note.reminder.snoozeAt = Date.now() + 10 * 60 * 1000;
+    else note.reminder.fireAt = Date.now() + 10 * 60 * 1000;
     scheduleNativeAlarm(note);
   }
   stopAlarmVibration();
@@ -2579,16 +2695,24 @@ function stopAlarm(noteId) {
     const reminder = note.reminder || ui.alarm;
     cancelNativeAlarm(reminder?.id || ui.alarm?.reminderId);
     clearNativeAlarmAlert(reminder?.id || ui.alarm?.reminderId);
-    archiveHistory("expired", note, {
-      reminderId: reminder?.id || ui.alarm?.reminderId,
-      occurredAt: new Date(reminder?.fireAt || Date.now()).toISOString()
-    });
-    state.notes = state.notes.filter((item) => item.id !== noteId);
-    delete plainPasswords.notes[noteId];
-    ui.unlockedNotes.delete(noteId);
+    if (isDeadlineReminder(reminder)) {
+      archiveHistory("expired", note, {
+        reminderId: reminder?.id || ui.alarm?.reminderId,
+        occurredAt: new Date(reminder?.fireAt || Date.now()).toISOString()
+      });
+      state.notes = state.notes.filter((item) => item.id !== noteId);
+      delete plainPasswords.notes[noteId];
+      ui.unlockedNotes.delete(noteId);
+    } else if (reminderType(reminder) === "single") {
+      note.reminder = null;
+    } else {
+      note.reminder.fireAt = nextRepeatAt(note.reminder);
+      scheduleNativeAlarm(note);
+    }
   }
   ui.alarm = null;
-  setView("history", { noteId: null, folderId: null });
+  if (note && isDeadlineReminder(note.reminder || ui.alarm)) setView("history", { noteId: null, folderId: null });
+  else setView(note?.folderId ? "folder" : "home", { noteId: null, folderId: note?.folderId || null });
   scheduleSave();
 }
 
@@ -2967,6 +3091,22 @@ function togglePin(target, id) {
   scheduleSave();
   renderPreservingScroll();
 }
+
+function activateSwipePin(noteId) {
+  ui.swipe = null;
+  togglePin("note", noteId);
+}
+
+function activateSwipeDelete(noteId) {
+  if (ui.swipe?.confirmId === noteId) {
+    ui.swipe = null;
+    deleteNote(noteId);
+    return;
+  }
+  ui.swipe = { noteId, offset: -82, confirmId: noteId, moved: false, axis: null };
+  renderPreservingScroll();
+}
+
 function lockTarget(target, id) {
   if (target === "folder") ui.unlockedFolders.delete(id);
   else ui.unlockedNotes.delete(id);
@@ -3094,6 +3234,35 @@ app.addEventListener("click", async (event) => {
     stepWheel(target.dataset.key, Number(target.dataset.dir));
     return;
   }
+  if (action === "reminder-type") {
+    const note = state.notes.find((item) => item.id === ui.modal?.id);
+    const draft = ensureReminderDraft(note);
+    draft.type = target.dataset.value;
+    if (draft.type === "repeat") {
+      const seed = ui.wheelDraft || getWheelParts(new Date(draft.fireAt));
+      draft.hour = seed.hour;
+      draft.minute = seed.min;
+    }
+    ui.wheelDraft = draft.type === "repeat"
+      ? getWheelParts(new Date(new Date().setHours(draft.hour, draft.minute, 0, 0)))
+      : getWheelParts(new Date(draft.fireAt));
+    render();
+    return;
+  }
+  if (action === "reminder-pattern") {
+    const note = state.notes.find((item) => item.id === ui.modal?.id);
+    ensureReminderDraft(note).pattern = target.dataset.value;
+    render();
+    return;
+  }
+  if (action === "reminder-weekday") {
+    const note = state.notes.find((item) => item.id === ui.modal?.id);
+    const draft = ensureReminderDraft(note);
+    const day = Number(target.dataset.value);
+    draft.weekdays = draft.weekdays.includes(day) ? draft.weekdays.filter((item) => item !== day) : [...draft.weekdays, day];
+    render();
+    return;
+  }
   if (action === "restore-previous") {
     restorePreviousVersion();
     return;
@@ -3151,20 +3320,18 @@ app.addEventListener("click", async (event) => {
   }
   if (action === "pin-note") {
     event.stopPropagation();
-    if (target.closest(".note-swipe-action")) ui.swipe = null;
-    togglePin("note", id);
+    if (target.closest(".note-swipe-action")) activateSwipePin(id);
+    else togglePin("note", id);
     return;
   }
   if (action === "swipe-delete-note") {
     event.stopPropagation();
-    ui.swipe = { noteId: id, offset: -82, confirmId: id };
-    renderPreservingScroll();
+    activateSwipeDelete(id);
     return;
   }
   if (action === "confirm-swipe-delete-note") {
     event.stopPropagation();
-    ui.swipe = null;
-    deleteNote(id);
+    activateSwipeDelete(id);
     return;
   }
   if (action === "close-swipe") {
@@ -3314,14 +3481,23 @@ if (action === "back") {
   if (action === "reminder") {
     const note = currentNote();
     ui.wheelDraft = null;
+    ui.reminderDraft = null;
     ui.modal = { type: "reminder", id: note.id };
     render();
   }
   if (action === "clear-reminder") {
     const note = state.notes.find((item) => item.id === id);
-    if (note?.reminder) cancelNativeAlarm(note.reminder.id);
-    if (note) note.reminder = null;
+    if (note?.reminder) {
+      cancelNativeAlarm(note.reminder.id);
+      clearNativeAlarmAlert(note.reminder.id);
+    }
+    if (note) {
+      note.reminder = null;
+      note.updatedAt = nowIso();
+    }
     ui.modal = null;
+    ui.wheelDraft = null;
+    ui.reminderDraft = null;
     scheduleSave();
     render();
   }
@@ -3484,7 +3660,16 @@ backupPicker.addEventListener("change", async () => {
 });
 app.addEventListener("click", (event) => {
   const swipeAction = event.target.closest(".note-swipe-action");
-  if (swipeAction) ui.suppressClick = false;
+  if (swipeAction) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    ui.suppressClick = false;
+    const action = swipeAction.dataset.action;
+    const noteId = swipeAction.dataset.id;
+    if (action === "pin-note") activateSwipePin(noteId);
+    if (action === "swipe-delete-note" || action === "confirm-swipe-delete-note") activateSwipeDelete(noteId);
+    return;
+  }
   if (ui.suppressClick && !swipeAction) {
     event.preventDefault();
     event.stopImmediatePropagation();
@@ -3492,6 +3677,21 @@ app.addEventListener("click", (event) => {
     return;
   }
   if (ui.swipe?.noteId && !swipeAction) {
+    const openShell = event.target.closest(`[data-swipe-note="${ui.swipe.noteId}"]`);
+    if (openShell) {
+      const rect = openShell.getBoundingClientRect();
+      const actionEdge = 96;
+      const inDeleteZone = ui.swipe.offset < 0 && event.clientX >= rect.right - actionEdge;
+      const inPinZone = ui.swipe.offset > 0 && event.clientX <= rect.left + actionEdge;
+      if (inDeleteZone || inPinZone) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        ui.suppressClick = false;
+        if (inDeleteZone) activateSwipeDelete(ui.swipe.noteId);
+        else activateSwipePin(ui.swipe.noteId);
+        return;
+      }
+    }
     ui.swipe = null;
     renderPreservingScroll();
     event.preventDefault();
@@ -3520,10 +3720,28 @@ app.addEventListener("pointerdown", (event) => {
     event.preventDefault();
     return;
   }
+  const revealedAction = event.target.closest(".note-swipe-action");
+  if (revealedAction && ui.swipe?.noteId) {
+    ui.swipeTap = {
+      noteId: revealedAction.dataset.id,
+      action: revealedAction.classList.contains("note-swipe-delete") ? "delete" : "pin"
+    };
+    return;
+  }
   const noteCard = event.target.closest("[data-long-note]");
   const folderCard = event.target.closest("[data-long-folder]");
   const card = noteCard || folderCard;
   if (!card) return;
+  if (noteCard && ui.swipe?.noteId === noteCard.dataset.longNote && ui.swipe.offset) {
+    const shell = noteCard.closest(".note-swipe-shell");
+    const rect = shell?.getBoundingClientRect();
+    const inDeleteZone = rect && ui.swipe.offset < 0 && event.clientX >= rect.right - 96;
+    const inPinZone = rect && ui.swipe.offset > 0 && event.clientX <= rect.left + 96;
+    ui.swipeTap = inDeleteZone || inPinZone
+      ? { noteId: ui.swipe.noteId, action: inDeleteZone ? "delete" : "pin" }
+      : null;
+    return;
+  }
   if (ui.noteMomentumFrame) {
     cancelAnimationFrame(ui.noteMomentumFrame);
     ui.noteMomentumFrame = null;
@@ -3663,14 +3881,31 @@ app.addEventListener("pointermove", (event) => {
 app.addEventListener("pointerup", (event) => {
   ui.wheelTouch = null;
   clearTimeout(ui.pressTimer);
+  if (ui.swipeTap) {
+    const tap = ui.swipeTap;
+    ui.swipeTap = null;
+    ui.suppressClick = true;
+    event.preventDefault();
+    if (tap.action === "delete") activateSwipeDelete(tap.noteId);
+    else activateSwipePin(tap.noteId);
+    setTimeout(() => { ui.suppressClick = false; }, 650);
+    ui.folderPan = null;
+    ui.notePan = null;
+    ui.pendingDrag = null;
+    return;
+  }
   if (ui.drag?.type === "folder") finishFolderDrag();
   else if (ui.drag) finishMemoDrag(event);
   if (ui.swipe?.moved) {
     ui.suppressClick = true;
-    if (Math.abs(ui.swipe.offset) < 58) ui.swipe = null;
-    else ui.swipe.offset = ui.swipe.offset > 0 ? 64 : -64;
+    if (Math.abs(ui.swipe.offset) < 32) ui.swipe = null;
+    else {
+      ui.swipe.offset = ui.swipe.offset > 0 ? 64 : -64;
+      ui.swipe.moved = false;
+      ui.swipe.axis = null;
+    }
     renderPreservingScroll();
-    setTimeout(() => { ui.suppressClick = false; }, 140);
+    setTimeout(() => { ui.suppressClick = false; }, 650);
   }
   if (ui.notePan?.moved && ui.notePan.scroll && Math.abs(ui.notePan.velocity) > 0.05) {
     const scroll = ui.notePan.scroll;
@@ -3688,7 +3923,7 @@ app.addEventListener("pointerup", (event) => {
   }
   if (ui.folderPan?.moved || ui.notePan?.moved) {
     ui.suppressClick = true;
-    setTimeout(() => { ui.suppressClick = false; }, 140);
+    setTimeout(() => { ui.suppressClick = false; }, 650);
   }
   ui.folderPan = null;
   ui.notePan = null;
@@ -3703,6 +3938,7 @@ app.addEventListener("pointercancel", () => {
   ui.folderPan = null;
   ui.notePan = null;
   ui.swipe = null;
+  ui.swipeTap = null;
   ui.longPressNoteId = null;
   ui.longPressFolderId = null;
   stopDragAutoScroll();

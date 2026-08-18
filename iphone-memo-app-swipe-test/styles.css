@@ -3181,6 +3181,145 @@ button {
   transition: transform 160ms ease, opacity 160ms ease, color 160ms ease !important;
 }
 
+/* Isolated reminder modes preview */
+.wheel-modal {
+  max-width: min(94vw, 430px);
+  padding: 20px 18px 16px;
+  border-radius: 28px;
+  background: rgba(255, 254, 250, 0.98);
+}
+
+.reminder-sheet-head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.reminder-sheet-head span,
+.reminder-section-label,
+.reminder-panel-head span,
+.reminder-next small {
+  color: #989184;
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.reminder-sheet-head h3 {
+  margin: 2px 0 0;
+  font-family: Georgia, serif;
+  font-size: 25px;
+  font-weight: 500;
+  font-style: normal;
+  letter-spacing: 0;
+  color: #20201e;
+  text-align: left;
+}
+
+.reminder-save {
+  min-width: 62px;
+  height: 36px;
+  border: 0;
+  border-radius: 18px;
+  background: #20201e;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.reminder-section-label { display: block; margin: 0 2px 8px; }
+.reminder-section-label.repeat-label { margin-top: 16px; }
+
+.reminder-segmented {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 3px;
+  padding: 3px;
+  border-radius: 15px;
+  background: #efebe3;
+}
+
+.reminder-segmented button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: #898175;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.reminder-segmented button.active {
+  background: #fffefa;
+  color: #20201e;
+  box-shadow: 0 3px 12px rgba(56, 48, 35, 0.1);
+}
+
+.reminder-wheel-panel {
+  margin-top: 14px;
+  padding: 12px 8px 4px;
+  border: 1px solid rgba(90, 76, 55, 0.13);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.reminder-status-row {
+  min-height: 45px;
+  margin-top: 12px;
+  padding: 0 5px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  text-align: left;
+}
+.reminder-status-row > div { min-width: 0; display: grid; gap: 3px; }
+.reminder-status-row span { color: #989184; font-size: 9px; font-weight: 800; text-transform: uppercase; }
+.reminder-status-row strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.wheel-picker.time-only { grid-template-columns: repeat(2, 86px); justify-content: center; gap: 20px; }
+
+.reminder-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 5px;
+  margin-top: 12px;
+}
+
+.reminder-weekdays button {
+  aspect-ratio: 1;
+  min-width: 0;
+  border: 1px solid rgba(90, 76, 55, 0.13);
+  border-radius: 50%;
+  background: #fff;
+  color: #8c8579;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.reminder-weekdays button.active { border-color: #b69255; background: #b69255; color: #fff; }
+
+.reminder-next {
+  min-height: 62px;
+  margin-top: 14px;
+  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: 36px 1fr auto;
+  gap: 9px;
+  align-items: center;
+  border-radius: 15px;
+  background: #262622;
+  color: #fff;
+  text-align: left;
+}
+
+.reminder-next-icon { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; background: rgba(182, 146, 85, 0.18); color: #d7b77c; }
+.reminder-next-icon svg { width: 18px; height: 18px; }
+.reminder-next div { display: grid; gap: 2px; }
+.reminder-next strong { font-size: 13px; }
+.reminder-next em { color: #d1c4ac; font-size: 9px; font-style: normal; }
+.remove-reminder { min-height: 28px; padding: 6px 10px; border: 0; border-radius: 10px; background: #f2e8d6; color: #9d783e; font-size: 10px; font-weight: 750; text-transform: uppercase; }
+
 .drag-ghost {
   user-select: none !important;
   -webkit-user-select: none !important;
@@ -4277,7 +4416,10 @@ html.ios-native .folder-note-list .note-card * {
 /* SwipeActions-inspired single-piece glass reveal. */
 .note-swipe-shell {
   isolation: isolate;
-  border-radius: 8px;
+  overflow: hidden;
+  border-radius: 24px;
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  box-shadow: 0 10px 28px rgba(42, 35, 24, .08);
 }
 .note-swipe-shell::before,
 .note-swipe-shell::after {
@@ -4306,19 +4448,22 @@ html.ios-native .folder-note-list .note-card * {
   inset-block: 4px !important;
   margin: 0 !important;
   border: 1px solid color-mix(in srgb, #fff 46%, transparent);
-  border-radius: 7px !important;
+  border-radius: 0 !important;
   backdrop-filter: blur(18px) saturate(1.22);
   -webkit-backdrop-filter: blur(18px) saturate(1.22);
   box-shadow: inset 0 1px 0 rgba(255,255,255,.56), 0 8px 22px rgba(35,30,22,.12);
   cursor: default;
   gap: 5px;
+  z-index: 5 !important;
 }
 .note-swipe-pin {
   background: color-mix(in srgb, var(--gold) 25%, rgba(255,255,255,.72)) !important;
   color: var(--gold) !important;
+  border-radius: 24px 10px 10px 24px !important;
 }
 .note-swipe-delete {
   background: color-mix(in srgb, var(--danger) 76%, rgba(255,255,255,.18)) !important;
+  border-radius: 10px 24px 24px 10px !important;
 }
 .note-swipe-delete.confirming {
   width: 82px !important;
@@ -4327,19 +4472,11 @@ html.ios-native .folder-note-list .note-card * {
 }
 .note-swipe-action > svg { flex: 0 0 17px; }
 .note-swipe-shell > .note-card {
-  border-radius: 8px !important;
+  border-radius: 24px !important;
   will-change: transform;
   backface-visibility: hidden;
 }
 .note-swipe-shell.swiping > .note-card { transition: none !important; }
-.swipe-scrim {
-  position: fixed;
-  inset: 0;
-  z-index: 90;
-  background: rgba(246, 242, 234, .18);
-  backdrop-filter: blur(1.5px);
-  -webkit-backdrop-filter: blur(1.5px);
-}
 
 /* History uses native momentum scrolling; it has no long-press drag conflict. */
 .history-list,
