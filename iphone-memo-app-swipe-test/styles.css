@@ -4380,6 +4380,18 @@ html.ios-native .folder-note-list .note-card * {
   touch-action: none !important;
 }
 
+.language-card { padding: 16px !important; border-radius: 24px !important; }
+.language-card h3 { margin: 0; }
+.language-local { font-size: 11px; color: var(--muted); }
+.language-switch { margin-top: 12px; }
+.language-switch button { min-height: 44px; }
+html[lang="zh-CN"] .kicker,
+html[lang="zh-CN"] .memo-mark strong,
+html[lang="zh-CN"] .save-state,
+html[lang="zh-CN"] .section-head h2,
+html[lang="zh-CN"] .dock-item { letter-spacing: .04em !important; }
+html[lang="zh-CN"] .memo-mark strong { white-space: nowrap; font-size: 12px; }
+html[lang="zh-CN"] .save-state { min-width: 56px; }
 .interaction-card { gap: 10px !important; }
 .interaction-switch {
   display: grid;
@@ -4406,11 +4418,11 @@ html.ios-native .folder-note-list .note-card * {
 
 .memo-screen .memo-scroll-content {
   scroll-padding-top: 18px;
-  scroll-padding-bottom: calc(88px + var(--keyboard-inset, 0px)) !important;
-  padding-bottom: calc(18px + var(--keyboard-inset, 0px)) !important;
+  scroll-padding-bottom: 28px !important;
+  padding-bottom: 18px !important;
 }
 .memo-screen .memo-scroll-content .editor-body {
-  padding-bottom: calc(84px + var(--keyboard-inset, 0px)) !important;
+  padding-bottom: 28px !important;
 }
 
 /* SwipeActions-inspired single-piece glass reveal. */
@@ -4479,6 +4491,21 @@ html.ios-native .folder-note-list .note-card * {
 .note-swipe-shell.swiping > .note-card { transition: none !important; }
 
 /* History uses native momentum scrolling; it has no long-press drag conflict. */
+.note-swipe-shell { overflow: hidden !important; }
+.note-swipe-shell::before, .note-swipe-shell::after { display: none !important; }
+.note-swipe-shell .note-swipe-action {
+  inset-block: 0 !important;
+  margin: 0 !important;
+  width: 64px !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  z-index: 0 !important;
+}
+.note-swipe-shell.swipe-left .note-card { border-top-right-radius: 0 !important; border-bottom-right-radius: 0 !important; }
+.note-swipe-shell.swipe-right .note-card { border-top-left-radius: 0 !important; border-bottom-left-radius: 0 !important; }
+.save-state.error { color: #b42318 !important; background: #fee4e2 !important; white-space: normal !important; letter-spacing: 0 !important; }
+
 .history-list,
 .history-list .history-card,
 .history-list .history-card * {

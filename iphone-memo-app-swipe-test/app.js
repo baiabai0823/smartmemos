@@ -188,12 +188,12 @@ function nowIso() {
 
 function fmtDate(iso) {
   const d = new Date(iso);
-  return d.toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
+  return d.toLocaleDateString(appLanguage, { month: "short", day: "numeric" });
 }
 
 function fmtTime(ts) {
   if (!ts) return "";
-  return new Date(ts).toLocaleString("zh-CN", {
+  return new Date(ts).toLocaleString(appLanguage, {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
@@ -368,20 +368,27 @@ async function load() {
     const payload = JSON.parse(raw);
     state = await decryptPayload(payload);
     normalizeState();
-  } catch {
-    seedData();
-    normalizeState();
-    await saveNow();
+  } catch (error) {
+    throw new Error("Local data could not be read. Original data has been preserved.", { cause: error });
   }
 }
 
-async function saveNow() {
+let saveQueue = Promise.resolve();
+let saveRevision = 0;
+let saveMaxTimer = null;
+function saveNow() {
+  const revision = ++saveRevision;
+  const operation = saveQueue.catch(() => {}).then(async () => {
   state.history = Array.isArray(state.history) ? state.history.filter((entry) => entry?.type !== "version") : [];
   const payloadState = JSON.parse(JSON.stringify(state));
   payloadState.passwordVault = normalizePasswordVault(plainPasswords);
   const encrypted = await encryptPayload(payloadState);
   localStorage.setItem(STORE_KEY, JSON.stringify(encrypted));
   localStorage.removeItem(LEGACY_PASSWORD_KEY);
+  return revision;
+  });
+  saveQueue = operation;
+  return operation;
 }
 
 function safeErrorSummary(error) {
@@ -431,11 +438,11 @@ function latestDiagnosticEvent(names) {
 }
 
 function formatDiagnosticTime(value) {
-  if (!value) return "Not Recorded";
+  if (!value) return tr("Not Recorded");
   const parsed = Number(value);
   if (Number.isFinite(parsed) && parsed > 0) return fmtTime(parsed);
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "Not Recorded" : fmtTime(date.toISOString());
+  return Number.isNaN(date.getTime()) ? tr("Not Recorded") : fmtTime(date.toISOString());
 }
 
 function reminderHealthSnapshot() {
@@ -458,7 +465,7 @@ function reminderHealthSnapshot() {
 function healthRow(label, ok, value = null) {
   const isKnown = typeof ok === "boolean";
   const className = isKnown ? (ok ? "ok" : "warn") : "neutral";
-  const text = value || (isKnown ? (ok ? "Allowed" : "Needs Check") : "Unknown");
+  const text = value || (isKnown ? (ok ? tr("Allowed") : tr("Needs Check")) : tr("Unknown"));
   return `<div class="health-row ${className}"><span>${label}</span><strong>${text}</strong></div>`;
 }
 
@@ -467,21 +474,21 @@ function renderReminderHealthCard() {
   const checks = [health.notificationAllowed, health.exactAlarmAllowed, health.batteryUnrestricted, health.fullScreenAlertAvailable];
   const known = checks.filter((item) => typeof item === "boolean");
   const ready = known.filter(Boolean).length;
-  const summary = known.length ? `${ready}/${known.length} Ready` : "Phone Check";
+  const summary = known.length ? `${ready}/${known.length} ${tr("Ready")}` : tr("Phone Check");
   return `
     <div class="settings-card compact-health-card">
       <div class="settings-inline-head">
         <div>
-          <h3>Reminder Health</h3>
-          <p class="muted">${summary} ? Last Triggered ${health.lastTriggeredTime}</p>
+          <h3>${tr("Reminder Health")}</h3>
+          <p class="muted">${summary} ${tr("? Last Triggered")} ${health.lastTriggeredTime}</p>
         </div>
-        <button class="small-btn" data-action="reminder-health">Details</button>
+        <button class="small-btn" data-action="reminder-health">${tr("Details")}</button>
       </div>
       <div class="health-strip">
-        ${healthRow("Notify", health.notificationAllowed)}
-        ${healthRow("Exact", health.exactAlarmAllowed)}
-        ${healthRow("Battery", health.batteryUnrestricted)}
-        ${healthRow("Full", health.fullScreenAlertAvailable)}
+        ${healthRow(tr("Notify"), health.notificationAllowed)}
+        ${healthRow(tr("Exact"), health.exactAlarmAllowed)}
+        ${healthRow(tr("Battery"), health.batteryUnrestricted)}
+        ${healthRow(tr("Full"), health.fullScreenAlertAvailable)}
       </div>
     </div>
   `;
@@ -517,7 +524,7 @@ function exportDiagnosticLog() {
   try {
     const nativeResult = nativeSaveBackup(fileName, text);
     if (nativeResult) {
-      ui.modal = { type: "result", status: "success", title: "Diagnostics Exported", message: "Diagnostic Log Saved On This Phone.", path: nativeResult.path };
+      ui.modal = { type: "result", status: "success", title: tr("Diagnostics Exported"), message: tr("Diagnostic Log Saved On This Phone."), path: nativeResult.path };
       render();
       return;
     }
@@ -531,25 +538,56 @@ function exportDiagnosticLog() {
   a.download = fileName;
   a.click();
   URL.revokeObjectURL(url);
-  ui.modal = { type: "result", status: "success", title: "Diagnostics Exported", message: "Diagnostic Log Download Started." };
+  ui.modal = { type: "result", status: "success", title: tr("Diagnostics Exported"), message: tr("Diagnostic Log Download Started.") };
   render();
 }
 function scheduleSave() {
   clearTimeout(ui.saveTimer);
-  ui.saveTimer = setTimeout(async () => {
-    setSaveStatus("saving");
-    await saveNow().catch(console.error);
-    setSaveStatus("completed");
-  }, 360);
+  setSaveStatus("typing");
+  ui.saveTimer = setTimeout(flushScheduledSave, 360);
+  if (!saveMaxTimer) saveMaxTimer = setTimeout(flushScheduledSave, 2000);
 }
+
+async function flushScheduledSave() {
+  clearTimeout(ui.saveTimer);
+  clearTimeout(saveMaxTimer);
+  ui.saveTimer = null;
+  saveMaxTimer = null;
+    setSaveStatus("saving");
+  try {
+    const revision = await saveNow();
+    if (revision === saveRevision && !ui.saveTimer) setSaveStatus("completed");
+  } catch (error) {
+    setSaveStatus("error");
+    console.error("Memo save failed", error?.name);
+  }
+}
+
+async function ensureSavedBeforeLeave() {
+  if (ui.view !== "editor") return true;
+  if (ui.saveStatus === "error" || ui.saveTimer || saveMaxTimer || ui.saveStatus === "typing" || ui.saveStatus === "saving") {
+    await flushScheduledSave();
+  }
+  if (ui.saveStatus === "error") {
+    showToast(appLanguage === "zh-CN" ? "保存失败，仍停留在编辑器" : "Save failed. Staying in editor.", 3200);
+    return false;
+  }
+  return true;
+}
+
+window.addEventListener("pagehide", () => {
+  if (ui.view === "editor" && (ui.saveTimer || saveMaxTimer || ui.saveStatus === "typing")) {
+    void flushScheduledSave();
+  }
+});
 
 function setSaveStatus(status) {
   ui.saveStatus = status;
   const badge = document.querySelector(".save-state");
   if (!badge) return;
-  const label = status === "typing" ? "TYPING" : status === "saving" ? "SAVING" : "COMPLETED";
+  const label = status === "typing" ? tr("TYPING") : status === "saving" ? tr("SAVING") : tr("COMPLETED");
   badge.className = `save-state ${status}`;
-  badge.textContent = label;
+  badge.textContent = status === "error" ? (appLanguage === "zh-CN" ? "保存失败，请导出备份" : "Save failed — export backup") : label;
 }
 
 function lockFolderScopedNotes(folderId) {
@@ -588,7 +626,7 @@ function folderBreadcrumb(folderId) {
     path.unshift(current);
     current = current.parentId ? state.folders.find((folder) => folder.id === current.parentId) : null;
   }
-  return [{ id: "root", name: "Vault" }, ...path];
+  return [{ id: "root", name: tr("Vault") }, ...path];
 }
 
 function renderFolderBreadcrumb(folderId) {
@@ -718,30 +756,30 @@ function renderHome() {
   app.innerHTML = `
     <section class="screen vault-screen">
       ${renderStatus(
-        "VAULT",
-        `PROPRIETARY NODE ${allCount} MEMOS`,
+        tr("VAULT"),
+        `${tr("PROPRIETARY NODE")} ${allCount} ${tr("MEMOS")}`,
         `
-          <button class="icon-btn ghost" data-action="theme" title="Theme">${state.settings.theme === "light" ? icon.sun : icon.moon}</button>
-          <button class="icon-btn" data-action="settings" title="Settings">${icon.gear}</button>
+          <button class="icon-btn ghost" data-action="theme" title="${tr("Theme")}">${state.settings.theme === "light" ? icon.sun : icon.moon}</button>
+          <button class="icon-btn" data-action="settings" title="${tr("Settings")}">${icon.gear}</button>
         `
       )}
       <label class="searchbar compact">
         <span class="search-icon">${icon.search}</span>
-        <input data-action="search" value="${escapeHtml(ui.search)}" placeholder="Search Vault" autocomplete="off" />
+        <input data-action="search" value="${escapeHtml(ui.search)}" placeholder="${tr("Search Vault")}" autocomplete="off" />
       </label>
       <div class="scroll">
         <div class="section-head quiet">
-          <h2>MEMO FILES</h2>
+          <h2>${tr("MEMO FILES")}</h2>
         </div>
         <div class="folder-strip compact-folders">
-          ${folders.map(renderFolderCard).join("") || `<div class="empty-folder-state home-empty-state">No Spaces</div>`}
+          ${folders.map(renderFolderCard).join("") || `<div class="empty-folder-state home-empty-state">${tr("No Spaces")}</div>`}
         </div>
         <div class="section-head quiet">
-          <h2>ACTIVE MEMOS</h2>
-          <span class="active-count">${rootNotes.length} Memos</span>
+          <h2>${tr("ACTIVE MEMOS")}</h2>
+          <span class="active-count">${rootNotes.length} ${tr("Memos")}</span>
         </div>
         <div class="note-list vault-root-notes" data-drop-root="true">
-          ${rootNotes.map(renderNoteCard).join("") || `<div class="empty-folder-state home-empty-state">Tap + To Create Memo</div>`}
+          ${rootNotes.map(renderNoteCard).join("") || `<div class="empty-folder-state home-empty-state">${tr("Tap + To Create Memo")}</div>`}
         </div>
       </div>
       ${renderDock("vault")}
@@ -755,13 +793,13 @@ function renderFolderCard(folder) {
   const dragging = ui.drag?.type === "folder" && ui.drag?.folderId === folder.id;
   return `
     <button class="folder-card ${dragging ? "dragging-placeholder" : ""} ${folder.hasPassword ? "has-lock" : ""} ${folder.pinnedAt ? "is-pinned" : ""} ${locked ? "is-locked" : ""} ${armed ? "delete-armed" : ""}" data-action="open-folder" data-id="${folder.id}" data-long-folder="${folder.id}">
-      ${folder.pinnedAt ? `<span class="pin-mark" title="Pinned">${pinSvg()}</span>` : ""}
+      ${folder.pinnedAt ? `<span class="pin-mark" title="${tr("Pinned")}">${pinSvg()}</span>` : ""}
       <div class="note-card-content">
         <div class="folder-top">
           <span class="folder-icon">${icon.folder}</span>
-          ${folder.hasPassword ? `<span class="lock-corner" data-action="lock-folder" data-id="${folder.id}" title="Lock Space">${icon.lock}</span>` : ""}
+          ${folder.hasPassword ? `<span class="lock-corner" data-action="lock-folder" data-id="${folder.id}" title="${tr("Lock Space")}">${icon.lock}</span>` : ""}
         </div>
-        <h3>${escapeHtml(folder.name || "Untitled Space")}</h3>
+        <h3>${escapeHtml(folder.name || tr("Untitled Space"))}</h3>
       </div>
       ${armed ? `<span class="long-actions"><span class="long-pin" data-action="pin-folder" data-id="${folder.id}">${pinSvg()}</span><span class="long-delete" data-action="delete-folder" data-id="${folder.id}">${icon.trash}</span></span>` : ""}
     </button>
@@ -769,14 +807,14 @@ function renderFolderCard(folder) {
 }
 
 function renderNoteImageMeta(imageCount) {
-  if (!IS_NATIVE_IOS) return "<span>" + (imageCount ? imageCount + " Images" : "") + "</span>";
+  if (!IS_NATIVE_IOS) return "<span>" + (imageCount ? imageCount + tr(" Images") : "") + "</span>";
   if (!imageCount) return '<span class="note-image-meta" aria-hidden="true"></span>';
-  return '<span class="note-image-meta">' + icon.image + "<span>" + imageCount + " Images</span></span>";
+  return '<span class="note-image-meta">' + icon.image + "<span>" + imageCount + ` ${tr("Images")}</span></span>`;
 }
 
 function renderNoteCard(note) {
   const accessible = noteIsAccessible(note);
-  const excerpt = accessible ? textFromHtml(note.bodyHtml) || "No Body" : "Enter Password";
+  const excerpt = accessible ? textFromHtml(note.bodyHtml) || tr("No Body") : tr("Enter Password");
   const imageCount = (note.images?.length || 0) + (note.bodyHtml.match(/<img/gi) || []).length;
   const armed = state.settings.cardInteraction === "longpress" && ui.longPressNoteId === note.id;
   const dragging = ui.drag?.type === "note" && ui.drag?.noteId === note.id;
@@ -786,22 +824,22 @@ function renderNoteCard(note) {
   const swipeLeft = swipeOpen < 0;
   return `
     <div class="note-swipe-shell ${swipeOpen ? "swipe-open" : ""} ${swipeRight ? "swipe-right" : ""} ${swipeLeft ? "swipe-left" : ""}" data-swipe-note="${note.id}">
-      ${state.settings.cardInteraction === "swipe" ? `<button type="button" class="note-swipe-action note-swipe-pin" data-action="pin-note" data-id="${note.id}" aria-label="Pin Memo">${pinSvg()}</button>
-      <button type="button" class="note-swipe-action note-swipe-delete ${swipeConfirm ? "confirming" : ""}" data-action="${swipeConfirm ? "confirm-swipe-delete-note" : "swipe-delete-note"}" data-id="${note.id}" aria-label="${swipeConfirm ? "Confirm Delete Memo" : "Delete Memo"}">${swipeConfirm ? `<span>Confirm</span>${icon.trash}` : icon.trash}</button>` : ""}
+      ${state.settings.cardInteraction === "swipe" ? `<button type="button" class="note-swipe-action note-swipe-pin" data-action="pin-note" data-id="${note.id}" aria-label="${tr("Pin Memo")}">${pinSvg()}</button>
+      <button type="button" class="note-swipe-action note-swipe-delete ${swipeConfirm ? "confirming" : ""}" data-action="${swipeConfirm ? "confirm-swipe-delete-note" : "swipe-delete-note"}" data-id="${note.id}" aria-label="${swipeConfirm ? tr("Confirm Delete Memo") : tr("Delete Memo")}">${swipeConfirm ? `<span>${tr("Confirm")}</span>${icon.trash}` : icon.trash}</button>` : ""}
       <button class="note-card ${dragging ? "dragging-placeholder" : ""} ${note.hasPassword ? "has-lock" : ""} ${note.pinnedAt ? "is-pinned" : ""} ${accessible ? "" : "is-locked"} ${armed ? "delete-armed" : ""}" style="--swipe-offset:${swipeOpen}px" data-action="open-note" data-id="${note.id}" data-long-note="${note.id}">
-      ${note.pinnedAt ? `<span class="pin-mark" title="Pinned">${pinSvg()}</span>` : ""}
+      ${note.pinnedAt ? `<span class="pin-mark" title="${tr("Pinned")}">${pinSvg()}</span>` : ""}
       <div class="note-card-content">
         <div class="note-top">
-          <h3>${escapeHtml(note.title || "Untitled Memo")}</h3>
+          <h3>${escapeHtml(note.title || tr("Untitled Memo"))}</h3>
           <div class="icon-row">
             ${note.reminder ? `<span class="badge gold">${icon.bell}</span>` : ""}
-            ${note.hasPassword ? `<span class="lock-corner" data-action="lock-note" data-id="${note.id}" title="Lock Memo">${icon.lock}</span>` : ""}
+            ${note.hasPassword ? `<span class="lock-corner" data-action="lock-note" data-id="${note.id}" title="${tr("Lock Memo")}">${icon.lock}</span>` : ""}
           </div>
         </div>
         <p class="excerpt">${escapeHtml(excerpt)}</p>
         <div class="meta">
           ${renderNoteImageMeta(imageCount)}
-          <span>Saved ${fmtTime(note.updatedAt)}</span>
+          <span>${tr("Saved")} ${fmtTime(note.updatedAt)}</span>
         </div>
       </div>
       ${armed ? `<span class="long-actions"><span class="long-pin" data-action="pin-note" data-id="${note.id}">${pinSvg()}</span><span class="long-delete" data-action="delete-note" data-id="${note.id}">${icon.trash}</span></span>` : ""}
@@ -837,14 +875,14 @@ function toolSvg(type) {
 function renderDock(active = "vault") {
   return `
     <nav class="dock">
-      <button class="dock-item ${active === "vault" ? "active" : ""}" data-action="dock-vault" title="Vault">
+      <button class="dock-item ${active === "vault" ? "active" : ""}" data-action="dock-vault" title="${tr("Vault")}">
         <span>${icon.vaultGlyph}</span>
-        <strong>VAULT</strong>
+        <strong>${tr("VAULT")}</strong>
       </button>
-      <button class="dock-add" data-action="create-menu" title="Add Memo">${icon.plus}</button>
-      <button class="dock-item ${active === "history" ? "active" : ""}" data-action="dock-history" title="History">
+      <button class="dock-add" data-action="create-menu" title="${tr("Add Memo")}">${icon.plus}</button>
+      <button class="dock-item ${active === "history" ? "active" : ""}" data-action="dock-history" title="${tr("History")}">
         <span>${icon.historyGlyph}</span>
-        <strong>HISTORY</strong>
+        <strong>${tr("HISTORY")}</strong>
       </button>
     </nav>
   `;
@@ -855,13 +893,13 @@ function renderHistory() {
   app.innerHTML = `
     <section class="screen vault-screen">
       ${renderStatus(
-        "HISTORY",
-        `${entries.length} Deleted / Expired Memos`,
-        `<button class="icon-btn" data-action="settings" title="Settings">${icon.gear}</button>`
+        tr("HISTORY"),
+        `${entries.length} ${tr("Deleted / Expired Memos")}`,
+        `<button class="icon-btn" data-action="settings" title="${tr("Settings")}">${icon.gear}</button>`
       )}
       <div class="scroll">
         <div class="note-list history-list">
-          ${entries.map(renderHistoryCard).join("") || `<div class="empty-folder-state home-empty-state history-empty-state">No Deleted Or Expired Memos</div>`}
+          ${entries.map(renderHistoryCard).join("") || `<div class="empty-folder-state home-empty-state history-empty-state">${tr("No Deleted Or Expired Memos")}</div>`}
         </div>
       </div>
       ${renderDock("history")}
@@ -871,13 +909,13 @@ function renderHistory() {
 
 function renderHistoryCard(entry) {
   const note = entry.note || {};
-  const label = entry.type === "expired" ? "Expired" : "Deleted";
-  const excerpt = textFromHtml(note.bodyHtml || "") || "No Body";
+  const label = entry.type === "expired" ? tr("Expired") : tr("Deleted");
+  const excerpt = textFromHtml(note.bodyHtml || "") || tr("No Body");
   return `
     <article class="note-card history-card">
       <button class="history-main" data-action="history-detail" data-id="${entry.id}">
         <div class="note-top">
-          <div><h3>${escapeHtml(note.title || entry.folder?.name || "Untitled Memo")}</h3><small class="history-folder-name">${escapeHtml(entry.folderName || "Local Memo")}</small></div>
+          <div><h3>${escapeHtml(note.title || entry.folder?.name || tr("Untitled Memo"))}</h3><small class="history-folder-name">${escapeHtml(entry.folderName || tr("Local Memo"))}</small></div>
           <span class="badge ${entry.type === "expired" ? "gold" : "danger"}">${label}</span>
         </div>
         <p class="excerpt">${escapeHtml(excerpt)}</p>
@@ -886,7 +924,7 @@ function renderHistoryCard(entry) {
         </div>
       </button>
       <div class="history-actions equal-actions">
-        <button class="small-btn gold icon-only restore-btn" data-action="restore-history" data-id="${entry.id}" title="Restore">${icon.restore}</button>
+        <button class="small-btn gold icon-only restore-btn" data-action="restore-history" data-id="${entry.id}" title="${tr("Restore")}">${icon.restore}</button>
         <button class="small-btn danger" data-action="delete-history" data-id="${entry.id}">${icon.trash}</button>
       </div>
     </article>
@@ -897,6 +935,8 @@ function renderFolder() {
   const folder = currentFolder();
   if (!folder) {
     setView("home", { folderId: null });
+    event.preventDefault();
+    event.stopImmediatePropagation();
     return;
   }
 
@@ -919,9 +959,9 @@ function renderFolder() {
     <section class="screen">
       ${renderStatus(
         escapeHtml(folder.name),
-        locked ? "Enter Password" : `${notes.length} Memos${folders.length ? ` / ${folders.length} Spaces` : ""}`,
+        locked ? tr("Enter Password") : `${notes.length} ${tr("Memos")}${folders.length ? ` / ${folders.length} ${tr("Spaces")}` : ""}`,
         `
-          <button class="icon-btn" data-action="back" title="Back">${icon.back}</button>
+          <button class="icon-btn" data-action="back" title="${tr("Back")}">${icon.back}</button>
           ${locked ? "" : `<button class="icon-btn" data-action="edit-folder" data-id="${folder.id}" title="Folder Settings">${icon.gear}</button>`}
         `
       )}
@@ -929,18 +969,18 @@ function renderFolder() {
       ${
         locked
           ? `<div class="lock-card lock-inline" data-action="unlock-folder" data-id="${folder.id}">
-              <h3>${icon.lock} ${escapeHtml(folder.name || "Locked Space")}</h3>
-              <p class="muted">Enter The Password To Continue.</p>
+              <h3>${icon.lock} ${escapeHtml(folder.name || tr("Locked Space"))}</h3>
+              <p class="muted">${tr("Enter The Password To Continue.")}</p>
             </div>`
           : `
             <label class="searchbar">
               <span class="search-icon">${icon.search}</span>
-              <input data-action="search" value="${escapeHtml(ui.search)}" placeholder="Search Current Space" autocomplete="off" />
+              <input data-action="search" value="${escapeHtml(ui.search)}" placeholder="${tr("Search Current Space")}" autocomplete="off" />
             </label>
             <div class="scroll">
               ${folders.length ? `<div class="folder-strip compact-folders nested-folders">${folders.map(renderFolderCard).join("")}</div>` : ""}
               <div class="note-list folder-note-list">
-                ${notes.map(renderNoteCard).join("") || `<div class="empty-folder-state">No Memos In This Space</div>`}
+                ${notes.map(renderNoteCard).join("") || `<div class="empty-folder-state">${tr("No Memos In This Space")}</div>`}
               </div>
             </div>
             ${renderDock("vault")}
@@ -972,17 +1012,17 @@ function renderEditor() {
               <header class="memo-head compact-head">
                 <div class="memo-mark">
                   <span>${icon.note}</span>
-                  <strong>MEMO CORE</strong>
+                  <strong>${tr("MEMO CORE")}</strong>
                 </div>
                 <div class="icon-row">
-                  <button class="restore-prev-btn icon-only" data-action="restore-previous" title="Restore Previous">${icon.back}</button>
+                  <button class="restore-prev-btn icon-only" data-action="restore-previous" title="${tr("Restore Previous")}">${icon.back}</button>
                   ${renderSaveStatus()}
-                  <button class="icon-btn soft" data-action="${closeAction}" title="Close">${icon.close}</button>
+                  <button class="icon-btn soft" data-action="${closeAction}" title="${tr("Close")}">${icon.close}</button>
                 </div>
               </header>
               <div class="memo-scroll-content">
-                <input class="editor-title label-title" data-action="edit-title" maxlength="80" value="${escapeHtml(note.title)}" placeholder="LABEL CORE TITLE" />
-                <div class="editor-body stream-body" data-action="edit-body" contenteditable="true" data-placeholder="STREAM CAPTURE...">${sanitizeHtml(note.bodyHtml)}</div>
+                <input class="editor-title label-title" data-action="edit-title" maxlength="80" value="${escapeHtml(note.title)}" placeholder="${tr("LABEL CORE TITLE")}" />
+                <div class="editor-body stream-body" data-action="edit-body" contenteditable="true" data-placeholder="${tr("STREAM CAPTURE...")}">${sanitizeHtml(note.bodyHtml)}</div>
               </div>
               <div class="format-popover" data-format-popover>
                 <button data-action="format-size" data-value="title">T</button>
@@ -998,26 +1038,26 @@ function renderEditor() {
               </div>
               ${renderImageTray(note)}
               <footer class="memo-control">
-                <span>TACTICAL CONTROL CENTER</span>
+                <span>${tr("TACTICAL CONTROL CENTER")}</span>
                 <div class="editor-toolbar tool-dock">
-                  <button class="icon-btn tool-btn ${note.images?.length ? "gold" : ""}" data-action="image-menu" title="Image">${icon.image}</button>
-                  <button class="icon-btn tool-btn ${note.reminder ? "gold" : ""}" data-action="reminder" title="Reminder">${icon.bell}</button>
-                  <button class="icon-btn tool-btn ${note.hasPassword ? "gold" : ""}" data-action="note-password" title="Lock">${icon.lock}</button>
+                  <button class="icon-btn tool-btn ${note.images?.length ? "gold" : ""}" data-action="image-menu" title="${tr("Image")}">${icon.image}</button>
+                  <button class="icon-btn tool-btn ${note.reminder ? "gold" : ""}" data-action="reminder" title="${tr("Reminder")}">${icon.bell}</button>
+                  <button class="icon-btn tool-btn ${note.hasPassword ? "gold" : ""}" data-action="note-password" title="${tr("Lock")}">${icon.lock}</button>
                 </div>
               </footer>
             </div>
           `
           : `
             <header class="status">
-              <button class="icon-btn" data-action="${folder ? "back-folder" : "back"}" title="Back">${icon.back}</button>
+              <button class="icon-btn" data-action="${folder ? "back-folder" : "back"}" title="${tr("Back")}">${icon.back}</button>
               <div class="status-title">
-                <p class="kicker">Locked Memo</p>
-                <h1 class="title">${escapeHtml(note.title || "Locked Memo")}</h1>
+                <p class="kicker">${tr("Locked Memo")}</p>
+                <h1 class="title">${escapeHtml(note.title || tr("Locked Memo"))}</h1>
               </div>
             </header>
             <div class="lock-card lock-editor-panel lock-inline" data-action="unlock-note" data-id="${note.id}">
-              <h3>${icon.lock} ${escapeHtml(note.title || "Locked Memo")}</h3>
-              <p class="muted">Enter The Password To Continue.</p>
+              <h3>${icon.lock} ${escapeHtml(note.title || tr("Locked Memo"))}</h3>
+              <p class="muted">${tr("Enter The Password To Continue.")}</p>
             </div>
           `
       }
@@ -1026,7 +1066,8 @@ function renderEditor() {
 }
 
 function renderSaveStatus() {
-  const label = ui.saveStatus === "typing" ? "TYPING" : ui.saveStatus === "saving" ? "SAVING" : "COMPLETED";
+  if (ui.saveStatus === "error") return `<span class="save-state error" role="alert">${appLanguage === "zh-CN" ? "保存失败，请导出备份" : "Save failed — export backup"}</span>`;
+  const label = ui.saveStatus === "typing" ? tr("TYPING") : ui.saveStatus === "saving" ? tr("SAVING") : tr("COMPLETED");
   return `<span class="save-state ${ui.saveStatus}">${label}</span>`;
 }
 
@@ -1058,13 +1099,13 @@ function renderImageManager(note) {
             <div class="image-row">
               <img src="${src}" alt="memo image ${index + 1}" />
               <div>
-                <strong>Image ${index + 1}</strong>
-                <span>Preview, Delete, Or Reorder.</span>
+                <strong>${tr("Image")} ${index + 1}</strong>
+                <span>${tr("Preview, Delete, Or Reorder.")}</span>
               </div>
               <div class="icon-row">
                 <button class="icon-btn" data-action="move-image-up" data-id="${id}" title="Move Up">${icon.moveUp}</button>
                 <button class="icon-btn" data-action="move-image-down" data-id="${id}" title="Move Down">${icon.moveDown}</button>
-                <button class="icon-btn" data-action="remove-image" data-id="${id}" title="Delete">${icon.close}</button>
+                <button class="icon-btn" data-action="remove-image" data-id="${id}" title="${tr("Delete")}">${icon.close}</button>
               </div>
             </div>
           `;
@@ -1078,48 +1119,55 @@ function renderSettings() {
   app.innerHTML = `
     <section class="screen settings-screen">
       ${renderStatus(
-        "Settings",
+        tr("Settings"),
         "",
-        `<button class="icon-btn" data-action="back" title="Back">${icon.back}</button>`
+        `<button class="icon-btn" data-action="back" title="${tr("Back")}">${icon.back}</button>`
       )}
       <div class="scroll">
         <div class="settings-grid product-settings-grid">
+          <div class="settings-card language-card">
+            <div class="settings-inline-head"><h3>${tr("Language")}</h3><span class="language-local">${appLanguage === "zh-CN" ? "仅保存在本机" : "Saved on this device"}</span></div>
+            <div class="interaction-switch language-switch" role="group" aria-label="${tr("Language")}">
+              <button class="${appLanguage === "zh-CN" ? "active" : ""}" data-action="language" data-value="zh-CN" aria-pressed="${appLanguage === "zh-CN"}">简体中文</button>
+              <button class="${appLanguage === "en" ? "active" : ""}" data-action="language" data-value="en" aria-pressed="${appLanguage === "en"}">English</button>
+            </div>
+          </div>
           <div class="settings-card appearance-card">
             <div class="settings-inline-head">
               <div>
-                <h3>Appearance</h3>
+                <h3>${tr("Appearance")}</h3>
               </div>
-              <button class="theme-mini-toggle" data-action="theme" title="Theme"><span>${state.settings.theme === "light" ? icon.sun : icon.moon}</span></button>
+              <button class="theme-mini-toggle" data-action="theme" title="${tr("Theme")}"><span>${state.settings.theme === "light" ? icon.sun : icon.moon}</span></button>
             </div>
             <div class="appearance-options">
               <div class="appearance-option">
                 <span class="appearance-swatch paper"></span>
-                <div><strong>Paper Glass</strong></div>
+                <div><strong>${tr("Paper Glass")}</strong></div>
               </div>
               <div class="appearance-option">
                 <span class="appearance-swatch gold"></span>
-                <div><strong>Champagne Accent</strong></div>
+                <div><strong>${tr("Champagne Accent")}</strong></div>
               </div>
             </div>
           </div>
           <div class="settings-card interaction-card">
-            <div class="settings-inline-head"><h3>Memo Actions</h3></div>
-            <div class="interaction-switch" role="group" aria-label="Memo card actions">
-              <button class="${state.settings.cardInteraction === "longpress" ? "active" : ""}" data-action="card-interaction" data-value="longpress">Long Press</button>
-              <button class="${state.settings.cardInteraction === "swipe" ? "active" : ""}" data-action="card-interaction" data-value="swipe">Swipe</button>
+            <div class="settings-inline-head"><h3>${tr("Memo Actions")}</h3></div>
+            <div class="interaction-switch" role="group" aria-label="${tr("Memo card actions")}">
+              <button class="${state.settings.cardInteraction === "longpress" ? "active" : ""}" data-action="card-interaction" data-value="longpress">${tr("Long Press")}</button>
+              <button class="${state.settings.cardInteraction === "swipe" ? "active" : ""}" data-action="card-interaction" data-value="swipe">${tr("Swipe")}</button>
             </div>
           </div>
           <div class="settings-card backup-card">
             <div class="settings-inline-head">
               <div>
-                <h3>Backup Vault</h3>
+                <h3>${tr("Backup Vault")}</h3>
               </div>
             </div>
             <div class="export-row backup-actions">
-              <button class="small-btn" data-action="export-preview">${icon.export} Export</button>
-              <button class="small-btn gold" data-action="import-backup">${icon.import} Import</button>
-              <button class="small-btn" data-action="verify-backup">${icon.restore} Verify</button>
-              <button class="small-btn" data-action="export-diagnostics">${icon.history} Logs</button>
+              <button class="small-btn" data-action="export-preview">${icon.export} ${tr("Export")}</button>
+              <button class="small-btn gold" data-action="import-backup">${icon.import} ${tr("Import")}</button>
+              <button class="small-btn" data-action="verify-backup">${icon.restore} ${tr("Verify")}</button>
+              <button class="small-btn" data-action="export-diagnostics">${icon.history} ${tr("Logs")}</button>
             </div>
           </div>
 
@@ -1149,7 +1197,7 @@ function passwordInput(name, value = "", placeholder = "", extra = "") {
   return `
     <div class="password-wrap">
       <input name="${name}" type="${shown ? "text" : "password"}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" ${extra} inputmode="latin" autocomplete="off" />
-      <button type="button" class="eye-btn ${shown ? "shown" : ""}" data-action="toggle-password" data-key="${escapeHtml(key)}" aria-label="${shown ? "Hide Password" : "Show Password"}">${shown ? icon.eye : icon.eyeOff}</button>
+      <button type="button" class="eye-btn ${shown ? "shown" : ""}" data-action="toggle-password" data-key="${escapeHtml(key)}" aria-label="${shown ? tr("Hide Password") : tr("Show Password")}">${shown ? icon.eye : icon.eyeOff}</button>
     </div>
   `;
 }
@@ -1168,10 +1216,10 @@ function modalHtml(modal) {
   if (modal.type === "create") {
     return `
       <div class="modal nexus-modal">
-        <div class="nexus-head"><h3>NEXUS CENTER</h3><button data-action="close-modal">${icon.close}</button></div>
+        <div class="nexus-head"><h3>${tr("NEXUS CENTER")}</h3><button data-action="close-modal">${icon.close}</button></div>
         <div class="nexus-list">
-          <button class="nexus-option space" data-action="new-folder" data-folder="${modal.folderId || ""}"><span>${icon.folder}</span><strong>SPACE</strong></button>
-          <button class="nexus-option memo" data-action="new-note" data-folder="${modal.folderId || ""}"><span>${icon.note}</span><strong>MEMO</strong></button>
+          <button class="nexus-option space" data-action="new-folder" data-folder="${modal.folderId || ""}"><span>${icon.folder}</span><strong>${tr("SPACE")}</strong></button>
+          <button class="nexus-option memo" data-action="new-note" data-folder="${modal.folderId || ""}"><span>${icon.note}</span><strong>${tr("MEMO")}</strong></button>
         </div>
       </div>
     `;
@@ -1182,10 +1230,10 @@ function modalHtml(modal) {
     const count = note?.images?.length || 0;
     return `
       <div class="modal image-menu-modal">
-        <h3>Image Node</h3>
+        <h3>${tr("Image Node")}</h3>
         <div class="action-list image-action-list">
-          <button data-action="add-image"><span class="menu-tool-icon gold">${icon.image}</span>Add Image</button>
-          <button data-action="commit-images" ${count ? "" : "disabled"}><span class="menu-tool-icon ${count ? "gold" : ""}">${icon.pictureAdd}</span>Insert Images (${count})</button>
+          <button data-action="add-image"><span class="menu-tool-icon gold">${icon.image}</span>${tr("Add Image")}</button>
+          <button data-action="commit-images" ${count ? "" : "disabled"}><span class="menu-tool-icon ${count ? "gold" : ""}">${icon.pictureAdd}</span>${tr("Insert Images (")}${count})</button>
         </div>
       </div>
     `;
@@ -1205,11 +1253,11 @@ function modalHtml(modal) {
     const note = entry?.note || {};
     return `
       <div class="modal history-detail-modal">
-        <h3>${escapeHtml(note.title || "Memo")}</h3>
-        <p class="muted">${escapeHtml(entry?.type === "expired" ? "Expired" : "Deleted")} - ${fmtTime(entry?.occurredAt)}</p>
-        <div class="history-body">${sanitizeHtml(note.bodyHtml || "No Body")}</div>
+        <h3>${escapeHtml(note.title || tr("Memo"))}</h3>
+        <p class="muted">${escapeHtml(entry?.type === "expired" ? tr("Expired") : tr("Deleted"))} - ${fmtTime(entry?.occurredAt)}</p>
+        <div class="history-body">${sanitizeHtml(note.bodyHtml || tr("No Body"))}</div>
         <div class="modal-actions">
-          <button class="small-btn gold icon-only restore-btn" data-action="restore-history" data-id="${modal.id}" title="Restore">${icon.restore}</button>
+          <button class="small-btn gold icon-only restore-btn" data-action="restore-history" data-id="${modal.id}" title="${tr("Restore")}">${icon.restore}</button>
           <button class="small-btn danger" data-action="delete-history" data-id="${modal.id}">${icon.trash}</button>
         </div>
       </div>
@@ -1220,16 +1268,16 @@ function modalHtml(modal) {
     const counts = backupCounts(state);
     return `
       <form class="modal backup-preview-modal" data-action="confirm-export">
-        <h3>Export Preview</h3>
-        <p class="muted">Choose What To Include Before Creating The Encrypted Backup.</p>
+        <h3>${tr("Export Preview")}</h3>
+        <p class="muted">${tr("Choose What To Include Before Creating The Encrypted Backup.")}</p>
         <div class="backup-checks">
-          ${checkboxRow("folders", "Folders", counts.folders)}
-          ${checkboxRow("memos", "Memos", counts.memos)}
-          ${checkboxRow("history", "History", counts.history)}
+          ${checkboxRow("folders", tr("Folders"), counts.folders)}
+          ${checkboxRow("memos", tr("Memos"), counts.memos)}
+          ${checkboxRow("history", tr("History"), counts.history)}
         </div>
         <div class="modal-actions">
-          <button class="small-btn" type="button" data-action="close-modal">Cancel</button>
-          <button class="small-btn gold" type="submit">Export</button>
+          <button class="small-btn" type="button" data-action="close-modal">${tr("Cancel")}</button>
+          <button class="small-btn gold" type="submit">${tr("Export")}</button>
         </div>
       </form>
     `;
@@ -1239,16 +1287,16 @@ function modalHtml(modal) {
     const counts = backupCounts(modal.payload?.state || {});
     return `
       <form class="modal backup-preview-modal" data-action="confirm-import">
-        <h3>Import Preview</h3>
-        <p class="muted">Choose What To Restore. Existing IDs Are Protected From Collision.</p>
+        <h3>${tr("Import Preview")}</h3>
+        <p class="muted">${tr("Choose What To Restore. Existing IDs Are Protected From Collision.")}</p>
         <div class="backup-checks">
-          ${checkboxRow("folders", "Folders", counts.folders)}
-          ${checkboxRow("memos", "Memos", counts.memos)}
-          ${checkboxRow("history", "History", counts.history)}
+          ${checkboxRow("folders", tr("Folders"), counts.folders)}
+          ${checkboxRow("memos", tr("Memos"), counts.memos)}
+          ${checkboxRow("history", tr("History"), counts.history)}
         </div>
         <div class="modal-actions">
-          <button class="small-btn" type="button" data-action="close-modal">Cancel</button>
-          <button class="small-btn gold" type="submit">Import</button>
+          <button class="small-btn" type="button" data-action="close-modal">${tr("Cancel")}</button>
+          <button class="small-btn gold" type="submit">${tr("Import")}</button>
         </div>
       </form>
     `;
@@ -1257,17 +1305,17 @@ function modalHtml(modal) {
     const health = reminderHealthSnapshot();
     return `
       <div class="modal health-modal">
-        <h3>Reminder Health Check</h3>
-        <p class="muted">If reminders do not appear, this panel shows which phone permission or system state needs attention.</p>
+        <h3>${tr("Reminder Health Check")}</h3>
+        <p class="muted">${tr("If reminders do not appear, this panel shows which phone permission or system state needs attention.")}</p>
         <div class="health-grid">
-          ${healthRow("Notification Allowed", health.notificationAllowed)}
-          ${healthRow("Exact Alarm Allowed", health.exactAlarmAllowed)}
-          ${healthRow("Battery Unrestricted", health.batteryUnrestricted)}
-          ${healthRow("Full Screen Alert Available", health.fullScreenAlertAvailable)}
-          ${healthRow("Last Scheduled Time", null, health.lastScheduledTime)}
-          ${healthRow("Last Triggered Time", null, health.lastTriggeredTime)}
+          ${healthRow(tr("Notification Allowed"), health.notificationAllowed)}
+          ${healthRow(tr("Exact Alarm Allowed"), health.exactAlarmAllowed)}
+          ${healthRow(tr("Battery Unrestricted"), health.batteryUnrestricted)}
+          ${healthRow(tr("Full Screen Alert Available"), health.fullScreenAlertAvailable)}
+          ${healthRow(tr("Last Scheduled Time"), null, health.lastScheduledTime)}
+          ${healthRow(tr("Last Triggered Time"), null, health.lastTriggeredTime)}
         </div>
-        <div class="modal-actions single-save"><button class="small-btn gold" data-action="close-modal">Done</button></div>
+        <div class="modal-actions single-save"><button class="small-btn gold" data-action="close-modal">${tr("Done")}</button></div>
       </div>
     `;
   }
@@ -1275,14 +1323,14 @@ function modalHtml(modal) {
   if (modal.type === "securityCenter") {
     return `
       <div class="modal security-modal">
-        <h3>Security Center</h3>
+        <h3>${tr("Security Center")}</h3>
         <div class="security-points">
-          <p><strong>No Internet Permission</strong><span>SmartMemo does not request internet access in the Android package.</span></p>
-          <p><strong>Encrypted Backup</strong><span>Exported .smemo files are encrypted and can be verified before import.</span></p>
-          <p><strong>Restore Support</strong><span>Deleted and expired memos can be restored from History.</span></p>
-          <p><strong>Local Control</strong><span>Your memos, folders, locks, images, and reminders remain on this phone unless you export a backup.</span></p>
+          <p><strong>${tr("No Internet Permission")}</strong><span>${tr("SmartMemo does not request internet access in the Android package.")}</span></p>
+          <p><strong>${tr("Encrypted Backup")}</strong><span>${tr("Exported .smemo files are encrypted and can be verified before import.")}</span></p>
+          <p><strong>${tr("Restore Support")}</strong><span>${tr("Deleted and expired memos can be restored from History.")}</span></p>
+          <p><strong>${tr("Local Control")}</strong><span>${tr("Your memos, folders, locks, images, and reminders remain on this phone unless you export a backup.")}</span></p>
         </div>
-        <div class="modal-actions single-save"><button class="small-btn gold" data-action="close-modal">Done</button></div>
+        <div class="modal-actions single-save"><button class="small-btn gold" data-action="close-modal">${tr("Done")}</button></div>
       </div>
     `;
   }
@@ -1291,14 +1339,14 @@ function modalHtml(modal) {
     const counts = modal.counts || {};
     return `
       <div class="modal backup-preview-modal">
-        <h3>Backup Verified</h3>
-        <p class="muted">This encrypted backup can be decrypted by SmartMemo.</p>
+        <h3>${tr("Backup Verified")}</h3>
+        <p class="muted">${tr("This encrypted backup can be decrypted by SmartMemo.")}</p>
         <div class="backup-checks">
-          ${checkboxRow("folders", "Folders", counts.folders || 0, false)}
-          ${checkboxRow("memos", "Memos", counts.memos || 0, false)}
-          ${checkboxRow("history", "History", counts.history || 0, false)}
+          ${checkboxRow("folders", tr("Folders"), counts.folders || 0, false)}
+          ${checkboxRow("memos", tr("Memos"), counts.memos || 0, false)}
+          ${checkboxRow("history", tr("History"), counts.history || 0, false)}
         </div>
-        <div class="modal-actions single-save"><button class="small-btn gold" data-action="close-modal">Done</button></div>
+        <div class="modal-actions single-save"><button class="small-btn gold" data-action="close-modal">${tr("Done")}</button></div>
       </div>
     `;
   }
@@ -1308,22 +1356,22 @@ function modalHtml(modal) {
     const recovery = folder ? plainPasswords.recovery.folders[folder.id] || {} : {};
     return `
       <form class="modal lock-config-modal compact-lock-config" data-action="save-folder">
-        <h3>Tactical Control Center</h3>
+        <h3>${tr("Tactical Control Center")}</h3>
         <input type="hidden" name="folderId" value="${folder?.id || ""}" />
         <input type="hidden" name="parentId" value="${folder?.parentId || modal.parentId || ""}" />
-        <div class="field"><label>Name</label><input name="name" required maxlength="32" value="${escapeHtml(folder?.name || "")}" placeholder="Space Name" /></div>
+        <div class="field"><label>${tr("Name")}</label><input name="name" required maxlength="32" value="${escapeHtml(folder?.name || "")}" placeholder="${tr("Space Name")}" /></div>
         <div class="cipher-grid">
-          <div class="field"><label>Cipher</label>${passwordInput("password", folder ? plainPasswords.folders[folder.id] || "" : "", "English Or Numbers, 4+")}</div>
-          <div class="field"><label>Hint</label><input name="hint" value="${escapeHtml(recovery.hint || "")}" placeholder="Hint" /></div>
+          <div class="field"><label>${tr("Cipher")}</label>${passwordInput("password", folder ? plainPasswords.folders[folder.id] || "" : "", tr("English Or Numbers, 4+"))}</div>
+          <div class="field"><label>${tr("Hint")}</label><input name="hint" value="${escapeHtml(recovery.hint || "")}" placeholder="${tr("Hint")}" /></div>
         </div>
         ${modal.error ? `<p class="danger-text">${escapeHtml(modal.error)}</p>` : ""}
-        <label class="recovery-toggle"><span>Required Recovery Security</span><input type="checkbox" name="recoveryEnabled" ${recovery.enabled ? "checked" : ""} /></label>
+        <label class="recovery-toggle"><span>${tr("Required Recovery Security")}</span><input type="checkbox" name="recoveryEnabled" ${recovery.enabled ? "checked" : ""} /></label>
         <div class="recovery-fields">
-          <div class="field"><input name="question" value="${escapeHtml(recovery.question || "")}" placeholder="Identity Challenge" /></div>
-          <div class="field"><input name="answer" value="${escapeHtml(recovery.answer || "")}" placeholder="Identity Response" /></div>
+          <div class="field"><input name="question" value="${escapeHtml(recovery.question || "")}" placeholder="${tr("Identity Challenge")}" /></div>
+          <div class="field"><input name="answer" value="${escapeHtml(recovery.answer || "")}" placeholder="${tr("Identity Response")}" /></div>
         </div>
         <div class="modal-actions single-save">
-          <button class="small-btn gold" type="submit">Save</button>
+          <button class="small-btn gold" type="submit">${tr("Save")}</button>
         </div>
       </form>
     `;
@@ -1333,18 +1381,18 @@ function modalHtml(modal) {
     const recovery = getRecovery(modal.target, modal.id);
     return `
       <form class="modal unlock-modal" data-action="verify-password">
-        <h3>${modal.target === "folder" ? "Unlock Space" : "Unlock Memo"}</h3>
+        <h3>${modal.target === "folder" ? tr("Unlock Space") : tr("Unlock Memo")}</h3>
         <input type="hidden" name="target" value="${modal.target}" />
         <input type="hidden" name="id" value="${modal.id}" />
         <div class="field">
-          <label>Password</label>
+          <label>${tr("Password")}</label>
           ${passwordInput("password", "", "", "autofocus")}
         </div>
-        ${modal.error ? `<p class="danger-text">Incorrect Password</p>${recovery.hint ? `<p class="hint-text">Hint: ${escapeHtml(recovery.hint)}</p>` : ""}` : ""}
-        ${recovery.enabled ? `<button class="forgot-link" type="button" data-action="forgot-password" data-target="${modal.target}" data-id="${modal.id}">Forgot Password</button>` : ""}
-        ${modal.recover ? `<div class="recovery-inline"><p class="hint-text">${escapeHtml(recovery.question || recovery.hint || "Enter Recovery Answer")}</p><div class="field"><label>Answer</label><input name="answer" /></div><button class="small-btn" type="button" data-action="verify-inline-recovery" data-target="${modal.target}" data-id="${modal.id}">Unlock With Answer</button></div>` : ""}
+        ${modal.error ? `<p class="danger-text">${tr("Incorrect Password")}</p>${recovery.hint ? `<p class="hint-text">${tr("Hint:")} ${escapeHtml(recovery.hint)}</p>` : ""}` : ""}
+        ${recovery.enabled ? `<button class="forgot-link" type="button" data-action="forgot-password" data-target="${modal.target}" data-id="${modal.id}">${tr("Forgot Password")}</button>` : ""}
+        ${modal.recover ? `<div class="recovery-inline"><p class="hint-text">${escapeHtml(recovery.question || recovery.hint || tr("Enter Recovery Answer"))}</p><div class="field"><label>${tr("Answer")}</label><input name="answer" /></div><button class="small-btn" type="button" data-action="verify-inline-recovery" data-target="${modal.target}" data-id="${modal.id}">${tr("Unlock With Answer")}</button></div>` : ""}
         <div class="modal-actions single-save">
-          <button class="small-btn gold" type="submit">Confirm</button>
+          <button class="small-btn gold" type="submit">${tr("Confirm")}</button>
         </div>
       </form>
     `;
@@ -1354,13 +1402,13 @@ function modalHtml(modal) {
     const recovery = getRecovery(modal.target, modal.id);
     return `
       <form class="modal unlock-modal" data-action="verify-recovery">
-        <h3>Password Recovery</h3>
+        <h3>${tr("Password Recovery")}</h3>
         <input type="hidden" name="target" value="${modal.target}" />
         <input type="hidden" name="id" value="${modal.id}" />
-        <p class="hint-text">${escapeHtml(recovery.question || recovery.hint || "Enter Recovery Answer")}</p>
-        <div class="field"><label>Answer</label><input name="answer" autofocus /></div>
-        ${modal.error ? `<p class="danger-text">Incorrect Answer</p>` : ""}
-        <div class="modal-actions single-save"><button class="small-btn gold" type="submit">Confirm</button></div>
+        <p class="hint-text">${escapeHtml(recovery.question || recovery.hint || tr("Enter Recovery Answer"))}</p>
+        <div class="field"><label>${tr("Answer")}</label><input name="answer" autofocus /></div>
+        ${modal.error ? `<p class="danger-text">${tr("Incorrect Answer")}</p>` : ""}
+        <div class="modal-actions single-save"><button class="small-btn gold" type="submit">${tr("Confirm")}</button></div>
       </form>
     `;
   }
@@ -1370,20 +1418,20 @@ function modalHtml(modal) {
     const recovery = note ? plainPasswords.recovery.notes[note.id] || {} : {};
     return `
       <form class="modal lock-config-modal compact-lock-config" data-action="save-note-password">
-        <h3>Tactical Control Center</h3>
+        <h3>${tr("Tactical Control Center")}</h3>
         <input type="hidden" name="id" value="${modal.id}" />
         <div class="cipher-grid">
-          <div class="field"><label>Cipher</label>${passwordInput("password", note ? plainPasswords.notes[note.id] || "" : "", "English Or Numbers, 4+")}</div>
-          <div class="field"><label>Hint</label><input name="hint" value="${escapeHtml(recovery.hint || "")}" placeholder="Hint" /></div>
+          <div class="field"><label>${tr("Cipher")}</label>${passwordInput("password", note ? plainPasswords.notes[note.id] || "" : "", tr("English Or Numbers, 4+"))}</div>
+          <div class="field"><label>${tr("Hint")}</label><input name="hint" value="${escapeHtml(recovery.hint || "")}" placeholder="${tr("Hint")}" /></div>
         </div>
         ${modal.error ? `<p class="danger-text">${escapeHtml(modal.error)}</p>` : ""}
-        <label class="recovery-toggle"><span>Required Recovery Security</span><input type="checkbox" name="recoveryEnabled" ${recovery.enabled ? "checked" : ""} /></label>
+        <label class="recovery-toggle"><span>${tr("Required Recovery Security")}</span><input type="checkbox" name="recoveryEnabled" ${recovery.enabled ? "checked" : ""} /></label>
         <div class="recovery-fields">
-          <div class="field"><input name="question" value="${escapeHtml(recovery.question || "")}" placeholder="Identity Challenge" /></div>
-          <div class="field"><input name="answer" value="${escapeHtml(recovery.answer || "")}" placeholder="Identity Response" /></div>
+          <div class="field"><input name="question" value="${escapeHtml(recovery.question || "")}" placeholder="${tr("Identity Challenge")}" /></div>
+          <div class="field"><input name="answer" value="${escapeHtml(recovery.answer || "")}" placeholder="${tr("Identity Response")}" /></div>
         </div>
         <div class="modal-actions single-save">
-          <button class="small-btn gold" type="submit">Save</button>
+          <button class="small-btn gold" type="submit">${tr("Save")}</button>
         </div>
       </form>
     `;
@@ -1399,20 +1447,20 @@ function modalHtml(modal) {
     return `
       <form class="modal wheel-modal" data-action="save-reminder">
         <input type="hidden" name="id" value="${modal.id}" />
-        <div class="reminder-sheet-head"><div><span>SMARTMEMO</span><h3>Reminder</h3></div><button class="reminder-save" type="submit">Save</button></div>
-        <span class="reminder-section-label">Reminder Type</span>
+        <div class="reminder-sheet-head"><div><span>SMARTMEMO</span><h3>${tr("Reminder")}</h3></div><button class="reminder-save" type="submit">${tr("Save")}</button></div>
+        <span class="reminder-section-label">${tr("Reminder Type")}</span>
         <div class="reminder-segmented">
           ${["single", "deadline", "repeat"].map((type) => `<button type="button" class="${reminderDraft.type === type ? "active" : ""}" data-action="reminder-type" data-value="${type}">${capitalize(type)}</button>`).join("")}
         </div>
         <div class="reminder-status-row">
-          <div><span>${reminderDraft.type === "deadline" ? "DUE DATE" : reminderDraft.type === "repeat" ? "REPEATING ALERT" : "ONE-TIME ALERT"}</span><strong>${formatReminderNext(reminderDraft)}</strong></div>
-          <button class="remove-reminder" type="button" data-action="clear-reminder" data-id="${modal.id}">Remove Reminder</button>
+          <div><span>${reminderDraft.type === "deadline" ? tr("DUE DATE") : reminderDraft.type === "repeat" ? tr("REPEATING ALERT") : tr("ONE-TIME ALERT")}</span><strong>${formatReminderNext(reminderDraft)}</strong></div>
+          <button class="remove-reminder" type="button" data-action="clear-reminder" data-id="${modal.id}">${tr("Remove Reminder")}</button>
         </div>
         ${reminderDraft.type === "repeat" ? renderRepeatReminderControls(reminderDraft, parts) : `
           <div class="reminder-wheel-panel">
             ${renderWheelPicker(parts)}
           </div>`}
-        <div class="reminder-next"><span class="reminder-next-icon">${icon.bell}</span><div><small>NEXT</small><strong>${formatReminderNext(reminderDraft)}</strong></div><em>China Time</em></div>
+        <div class="reminder-next"><span class="reminder-next-icon">${icon.bell}</span><div><small>${tr("NEXT")}</small><strong>${formatReminderNext(reminderDraft)}</strong></div><em>${tr("China Time")}</em></div>
       </form>
     `;
   }
@@ -1424,12 +1472,12 @@ function modalHtml(modal) {
     return `
       <form class="modal wheel-modal" data-action="restore-expired">
         <input type="hidden" name="id" value="${modal.id}" />
-        <h3>RESTORE TIMER</h3>
-        <p class="muted wheel-copy">Set A New Time Before Restoring This Expired Memo.</p>
+        <h3>${tr("RESTORE TIMER")}</h3>
+        <p class="muted wheel-copy">${tr("Set A New Time Before Restoring This Expired Memo.")}</p>
         ${renderWheelPicker(parts)}
         <div class="modal-actions">
-          <button class="small-btn" type="button" data-action="close-modal">Cancel</button>
-          <button class="small-btn gold" type="submit">Restore</button>
+          <button class="small-btn" type="button" data-action="close-modal">${tr("Cancel")}</button>
+          <button class="small-btn gold" type="submit">${tr("Restore")}</button>
         </div>
       </form>
     `;
@@ -1438,13 +1486,13 @@ function modalHtml(modal) {
   if (modal.type === "folderMenu") {
     return `
       <div class="modal">
-        <h3>Space Settings</h3>
+        <h3>${tr("Space Settings")}</h3>
         <div class="action-list">
-          <button data-action="edit-folder" data-id="${modal.id}">Edit Space</button>
-          <button data-action="delete-folder" data-id="${modal.id}">Delete Space</button>
+          <button data-action="edit-folder" data-id="${modal.id}">${tr("Edit Space")}</button>
+          <button data-action="delete-folder" data-id="${modal.id}">${tr("Delete Space")}</button>
 
         </div>
-        <div class="modal-actions"><button class="small-btn" data-action="close-modal">Close</button></div>
+        <div class="modal-actions"><button class="small-btn" data-action="close-modal">${tr("Close")}</button></div>
       </div>
     `;
   }
@@ -1455,8 +1503,8 @@ function modalHtml(modal) {
         <h3>${escapeHtml(modal.title)}</h3>
         <p class="muted">${escapeHtml(modal.message || "")}</p>
         <div class="modal-actions">
-          <button class="small-btn" data-action="close-modal">Cancel</button>
-          <button class="small-btn danger" data-action="${modal.confirmAction}" data-id="${modal.id}">Delete</button>
+          <button class="small-btn" data-action="close-modal">${tr("Cancel")}</button>
+          <button class="small-btn danger" data-action="${modal.confirmAction}" data-id="${modal.id}">${tr("Delete")}</button>
         </div>
       </div>
     `;
@@ -1465,10 +1513,10 @@ function modalHtml(modal) {
   if (modal.type === "result") {
     return `
       <div class="modal result-modal ${modal.status || "success"}">
-        <h3>${escapeHtml(modal.title || "Complete")}</h3>
+        <h3>${escapeHtml(modal.title || tr("Complete"))}</h3>
         <p class="muted">${escapeHtml(modal.message || "")}</p>
         ${modal.path ? `<p class="export-path">${escapeHtml(modal.path)}</p>` : ""}
-        <div class="modal-actions"><button class="small-btn gold" data-action="close-modal">Done</button></div>
+        <div class="modal-actions"><button class="small-btn gold" data-action="close-modal">${tr("Done")}</button></div>
       </div>
     `;
   }
@@ -1529,11 +1577,11 @@ function renderWheelPicker(parts, timeOnly = false) {
   const pad = (v) => String(v).padStart(2, "0");
   return `
     <div class="wheel-picker ${timeOnly ? "time-only" : ""}" data-action="wheel-picker">
-      ${timeOnly ? "" : renderWheelColumn("year", "YEAR", parts.year, parts.year - 1, parts.year + 1)}
-      ${timeOnly ? "" : renderWheelColumn("month", "MONTH", pad(parts.month), pad(parts.month === 1 ? 12 : parts.month - 1), pad(parts.month === 12 ? 1 : parts.month + 1))}
-      ${timeOnly ? "" : renderWheelColumn("day", "DAY", pad(parts.day), pad(Math.max(1, parts.day - 1)), pad(Math.min(daysInMonth(parts.year, parts.month), parts.day + 1)))}
-      ${renderWheelColumn("hour", "HOUR", pad(parts.hour), pad((parts.hour + 23) % 24), pad((parts.hour + 1) % 24))}
-      ${renderWheelColumn("min", "MIN", pad(parts.min), pad((parts.min + 59) % 60), pad((parts.min + 1) % 60))}
+      ${timeOnly ? "" : renderWheelColumn("year", tr("YEAR"), parts.year, parts.year - 1, parts.year + 1)}
+      ${timeOnly ? "" : renderWheelColumn("month", tr("MONTH"), pad(parts.month), pad(parts.month === 1 ? 12 : parts.month - 1), pad(parts.month === 12 ? 1 : parts.month + 1))}
+      ${timeOnly ? "" : renderWheelColumn("day", tr("DAY"), pad(parts.day), pad(Math.max(1, parts.day - 1)), pad(Math.min(daysInMonth(parts.year, parts.month), parts.day + 1)))}
+      ${renderWheelColumn("hour", tr("HOUR"), pad(parts.hour), pad((parts.hour + 23) % 24), pad((parts.hour + 1) % 24))}
+      ${renderWheelColumn("min", tr("MIN"), pad(parts.min), pad((parts.min + 59) % 60), pad((parts.min + 1) % 60))}
     </div>
     <input class="wheel-at" type="hidden" name="at" value="${parts.iso}" />
   `;
@@ -1545,7 +1593,7 @@ function reminderType(reminder) {
 
 function capitalize(value) {
   const text = String(value || "");
-  return text ? text[0].toUpperCase() + text.slice(1).toLowerCase() : "";
+  return text ? tr(text[0].toUpperCase() + text.slice(1).toLowerCase()) : "";
 }
 
 function isDeadlineReminder(reminder) {
@@ -1590,17 +1638,17 @@ function ensureReminderDraft(note) {
 
 function formatReminderNext(reminder) {
   const at = reminder.type === "repeat" ? nextRepeatAt(reminder) : Number(reminder.fireAt);
-  if (!at) return "Choose At Least One Day";
-  return new Intl.DateTimeFormat("en", {
+  if (!at) return tr("Choose At Least One Day");
+  return new Intl.DateTimeFormat(appLanguage, {
     weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false
   }).format(at);
 }
 
 function renderRepeatReminderControls(draft, parts) {
-  const patterns = [["daily", "Every Day"], ["weekdays", "Weekdays"], ["custom", "Custom"]];
-  const days = [[1, "M"], [2, "T"], [3, "W"], [4, "T"], [5, "F"], [6, "S"], [0, "S"]];
+  const patterns = [["daily", tr("Every Day")], ["weekdays", tr("Weekdays")], ["custom", tr("Custom")]];
+  const days = appLanguage === "zh-CN" ? [[1, "一"], [2, "二"], [3, "三"], [4, "四"], [5, "五"], [6, "六"], [0, "日"]] : [[1, "M"], [2, "T"], [3, "W"], [4, "T"], [5, "F"], [6, "S"], [0, "S"]];
   return `
-    <span class="reminder-section-label repeat-label">Repeat Pattern</span>
+    <span class="reminder-section-label repeat-label">${tr("Repeat Pattern")}</span>
     <div class="reminder-segmented">${patterns.map(([value, label]) => `<button type="button" class="${draft.pattern === value ? "active" : ""}" data-action="reminder-pattern" data-value="${value}">${label}</button>`).join("")}</div>
     ${draft.pattern === "custom" ? `<div class="reminder-weekdays">${days.map(([day, label]) => `<button type="button" class="${draft.weekdays.includes(day) ? "active" : ""}" data-action="reminder-weekday" data-value="${day}">${label}</button>`).join("")}</div>` : ""}
     <div class="reminder-wheel-panel">${renderWheelPicker(parts, true)}</div>
@@ -1650,11 +1698,11 @@ function renderAlarm() {
         <div class="alarm-particles" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
         <div class="timeup-card">
           <div class="timeup-bell">${icon.bell}</div>
-          <h2>TIME IS UP</h2>
-          <p>${escapeHtml(note?.title || "Memo Reminder")}</p>
+          <h2>${tr("TIME IS UP")}</h2>
+          <p>${escapeHtml(note?.title || tr("Memo Reminder"))}</p>
           <div class="timeup-actions">
-            <button class="timeup-btn secondary" data-action="snooze-alarm" data-id="${ui.alarm.noteId}">10 MIN</button>
-            <button class="timeup-btn" data-action="stop-alarm" data-id="${ui.alarm.noteId}">GET IT!</button>
+            <button class="timeup-btn secondary" data-action="snooze-alarm" data-id="${ui.alarm.noteId}">${tr("10 MIN")}</button>
+            <button class="timeup-btn" data-action="stop-alarm" data-id="${ui.alarm.noteId}">${tr("GET IT!")}</button>
           </div>
         </div>
       </div>
@@ -1752,7 +1800,7 @@ function showSilentNotice(message) {
 
 function validateCipher(password) {
   if (!password) return "";
-  if (!/^[A-Za-z0-9]{4,}$/.test(password)) return "Password Must Use 4+ English Letters Or Numbers.";
+  if (!/^[A-Za-z0-9]{4,}$/.test(password)) return tr("Password Must Use 4+ English Letters Or Numbers.");
   return "";
 }
 
@@ -1801,7 +1849,7 @@ function verifyPassword(form) {
   if (password === MASTER_PASSWORD || stored === password) {
     openUnlockedTarget(target, id);
   } else {
-    ui.modal = { type: "unlock", target, id, error: "Incorrect Password" };
+    ui.modal = { type: "unlock", target, id, error: tr("Incorrect Password") };
     render();
   }
 }
@@ -1812,7 +1860,7 @@ function verifyRecovery(form) {
     openUnlockedTarget(data.target, data.id);
     return;
   } else {
-    ui.modal = { type: "recover", target: data.target, id: data.id, error: "Incorrect Answer" };
+    ui.modal = { type: "recover", target: data.target, id: data.id, error: tr("Incorrect Answer") };
   }
   render();
 }
@@ -2032,12 +2080,12 @@ async function ensureIosNotificationPermission() {
 
 function iosReminderCandidates() {
   const now = Date.now();
-  const formatter = new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const formatter = new Intl.DateTimeFormat(appLanguage, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   return state.notes.flatMap((note) => {
     const reminder = note.reminder;
     if (!reminder?.id) return [];
     const type = reminderType(reminder);
-    const title = String(note.title || "Memo Reminder").trim().slice(0, 42);
+    const title = String(note.title || tr("Memo Reminder")).trim().slice(0, 42);
     const base = (code, triggerAt, body, schedule, extra = {}) => ({
       id: iosNotificationId(reminder.id, code),
       triggerAt,
@@ -2050,26 +2098,26 @@ function iosReminderCandidates() {
     });
     if (type === "single") {
       const at = Number(reminder.fireAt);
-      return at > now + 1000 ? [base("single", at, `Reminder  -  ${formatter.format(at)}`, { at: new Date(at) }, { fireAt: at })] : [];
+      return at > now + 1000 ? [base("single", at, `${tr("Reminder  -")}  ${formatter.format(at)}`, { at: new Date(at) }, { fireAt: at })] : [];
     }
     if (type === "repeat") {
       const recurring = repeatWeekdays(reminder).map((weekday) => {
         const triggerAt = nextRepeatAt({ ...reminder, pattern: "custom", weekdays: [weekday] }, now);
-        return base(`repeat-${weekday}`, triggerAt, `Repeats  -  ${String(reminder.hour).padStart(2, "0")}:${String(reminder.minute).padStart(2, "0")}`,
+        return base(`repeat-${weekday}`, triggerAt, `${tr("Repeats  -")}  ${String(reminder.hour).padStart(2, "0")}:${String(reminder.minute).padStart(2, "0")}`,
           { on: { weekday: weekday + 1, hour: reminder.hour, minute: reminder.minute }, repeats: true },
           { fireAt: triggerAt, weekday });
       }).filter((item) => item.triggerAt);
       const snoozeAt = Number(reminder.snoozeAt);
-      if (snoozeAt > now + 1000) recurring.push(base("snooze", snoozeAt, "Snoozed Reminder", { at: new Date(snoozeAt) }, { fireAt: snoozeAt }));
+      if (snoozeAt > now + 1000) recurring.push(base("snooze", snoozeAt, tr("Snoozed Reminder"), { at: new Date(snoozeAt) }, { fireAt: snoozeAt }));
       return recurring;
     }
     const deadline = Number(reminder.fireAt);
     if (deadline <= now) return [];
     return IOS_REMINDER_STAGES.map(([code, offset, remaining, content, level]) => base(
       code, deadline - offset,
-      `${remaining}  -  Due ${formatter.format(deadline)}\n${content}`,
+      `${tr(remaining)}  ${tr("-  Due")} ${formatter.format(deadline)}\n${tr(content)}`,
       { at: new Date(deadline - offset) },
-      { fireAt: deadline, remaining, deadline: formatter.format(deadline), level, content }
+      { fireAt: deadline, remaining: tr(remaining), deadline: formatter.format(deadline), level, content: tr(content) }
     )).filter((item) => item.triggerAt > now + 1000);
   }).sort((a, b) => a.triggerAt - b.triggerAt).slice(0, IOS_NOTIFICATION_LIMIT);
 }
@@ -2112,9 +2160,9 @@ async function initializeIosNotifications() {
       types: [{
         id: IOS_NOTIFICATION_ACTION_TYPE,
         actions: [
-          { id: "VIEW_MEMO", title: "View Memo", foreground: true },
-          { id: "COMPLETE_MEMO", title: "Mark Complete", foreground: true },
-          { id: "SNOOZE_10", title: "Remind In 10 Minutes", foreground: false }
+          { id: "VIEW_MEMO", title: tr("View Memo"), foreground: true },
+          { id: "COMPLETE_MEMO", title: tr("Mark Complete"), foreground: true },
+          { id: "SNOOZE_10", title: tr("Remind In 10 Minutes"), foreground: false }
         ]
       }]
     });
@@ -2140,7 +2188,7 @@ function scheduleNativeAlarm(note) {
   if (!note?.reminder) return false;
   if (window.SmartMemoAndroid?.scheduleAlarm) {
     try {
-      const ok = Boolean(window.SmartMemoAndroid.scheduleAlarm(note.reminder.id, Number(note.reminder.fireAt), note.title || "Memo Reminder"));
+      const ok = Boolean(window.SmartMemoAndroid.scheduleAlarm(note.reminder.id, Number(note.reminder.fireAt), note.title || tr("Memo Reminder")));
       addDiagnosticLog("alarm.native.schedule", { reminderId: note.reminder.id, fireAt: note.reminder.fireAt, ok });
       return ok;
     } catch (error) {
@@ -2222,7 +2270,7 @@ function saveReminder(form) {
   const type = draft.type;
   let fireAt = type === "repeat" ? nextRepeatAt(draft) : wheelDateFromParts(ui.wheelDraft).getTime();
   if (!fireAt) {
-    showToast("Choose At Least One Day");
+    showToast(tr("Choose At Least One Day"));
     return;
   }
   const previousReminderId = note.reminder?.id;
@@ -2259,7 +2307,7 @@ function archiveHistory(type, note, extra = {}) {
     id: uid("history"),
     type,
     reminderId: extra.reminderId || null,
-    folderName: folder?.name || "Local Memo",
+    folderName: folder?.name || tr("Local Memo"),
     occurredAt: extra.occurredAt || nowIso(),
     note: {
       id: note.id,
@@ -2350,7 +2398,7 @@ function archiveFolderHistory(folder, notes) {
     note: {
       id: folder.id,
       title: folder.name,
-      bodyHtml: notes.map((note) => `<h4>${escapeHtml(note.title || "Untitled Memo")}</h4>${sanitizeHtml(note.bodyHtml || "")}`).join("<hr>"),
+      bodyHtml: notes.map((note) => `<h4>${escapeHtml(note.title || tr("Untitled Memo"))}</h4>${sanitizeHtml(note.bodyHtml || "")}`).join("<hr>"),
       category: "folder",
       hasPassword: Boolean(folder.hasPassword),
       reminderAt: null,
@@ -2403,7 +2451,7 @@ function deleteFolder(id) {
   scheduleSave();
 }
 function downloadFolderHint() {
-  return "Saved To The Phone Download Folder Or The Browser Default Download Folder.";
+  return tr("Saved To The Phone Download Folder Or The Browser Default Download Folder.");
 }
 
 function restoreHistory(id, options = {}) {
@@ -2412,7 +2460,7 @@ function restoreHistory(id, options = {}) {
   const note = {
     id: uid("note"),
     folderId: state.folders.some((folder) => folder.id === entry.note.folderId) ? entry.note.folderId : null,
-    title: entry.note.title || "Restored Memo",
+    title: entry.note.title || tr("Restored Memo"),
     bodyHtml: sanitizeHtml(entry.note.bodyHtml || ""),
     favorite: false,
     category: entry.note.category || "default",
@@ -2435,7 +2483,7 @@ function restorePreviousVersion() {
   const note = currentNote();
   const previous = note?.previousVersion;
   if (!note || !previous) {
-    showSilentNotice("No Previous Version Found.");
+    showSilentNotice(tr("No Previous Version Found."));
     return;
   }
   ui.snapshotLock = note.id;
@@ -2508,7 +2556,7 @@ function nativeSaveBackup(fileName, backupText) {
   if (!window.SmartMemoAndroid?.saveBackup) return null;
   const raw = window.SmartMemoAndroid.saveBackup(fileName, utf8ToBase64(backupText));
   const result = raw ? JSON.parse(raw) : null;
-  if (!result?.ok) throw new Error(result?.message || "Android Save Failed");
+  if (!result?.ok) throw new Error(result?.message || tr("Android Save Failed"));
   return result;
 }
 async function iosSaveBackup(fileName, backupText) {
@@ -2526,10 +2574,10 @@ async function iosSaveBackup(fileName, backupText) {
   if (!saved?.uri) throw new Error("IOS_EXPORT_WRITE_FAILED");
 
   await share.share({
-    title: "SmartMemo Backup",
-    text: "Encrypted SmartMemo Backup",
+    title: tr("SmartMemo Backup"),
+    text: tr("Encrypted SmartMemo Backup"),
     files: [saved.uri],
-    dialogTitle: "Save SmartMemo Backup"
+    dialogTitle: tr("Save SmartMemo Backup")
   });
 
   return { ok: true, path: `On My iPhone/SmartMemo/${fileName}` };
@@ -2552,8 +2600,8 @@ async function exportBackup(options = {}) {
       ui.modal = {
         type: "result",
         status: "success",
-        title: "Mobile Export Complete",
-        message: `Backup Verified | ${counts.folders} Folders | ${counts.memos} Memos | ${counts.history} History Items`,
+        title: tr("Mobile Export Complete"),
+        message: `${tr("Backup Verified |")} ${counts.folders} ${tr("Folders |")} ${counts.memos} ${tr("Memos |")} ${counts.history} ${tr("History Items")}`,
         path: nativeResult.path || `Downloads/SmartMemo/${fileName}`
       };
     } else {
@@ -2567,14 +2615,14 @@ async function exportBackup(options = {}) {
       ui.modal = {
         type: "result",
         status: "success",
-        title: "Export Started",
-        message: `Backup Verified | ${counts.folders} Folders | ${counts.memos} Memos | ${counts.history} History Items`,
+        title: tr("Export Started"),
+        message: `${tr("Backup Verified |")} ${counts.folders} ${tr("Folders |")} ${counts.memos} ${tr("Memos |")} ${counts.history} ${tr("History Items")}`,
         path: downloadFolderHint()
       };
     }
   } catch (error) {
     addDiagnosticLog("backup.export.failed", { error: safeErrorSummary(error) });
-    ui.modal = { type: "result", status: "error", title: "Mobile Export Failed", message: error?.message || "Backup File Was Not Saved On This Phone." };
+    ui.modal = { type: "result", status: "error", title: tr("Mobile Export Failed"), message: error?.message || tr("Backup File Was Not Saved On This Phone.") };
   }
   render();
 }
@@ -2589,7 +2637,7 @@ async function verifyBackupFile(file) {
     ui.modal = { type: "verifyResult", counts };
   } catch (error) {
     addDiagnosticLog("backup.verify.failed", { error: safeErrorSummary(error) });
-    ui.modal = { type: "result", status: "error", title: "Verify Failed", message: "This Backup Could Not Be Decrypted By SmartMemo." };
+    ui.modal = { type: "result", status: "error", title: tr("Verify Failed"), message: tr("This Backup Could Not Be Decrypted By SmartMemo.") };
   }
   render();
 }
@@ -2662,7 +2710,7 @@ async function applyImportBackup(imported, options = {}) {
   await saveNow();
   ui.pendingImport = null;
   addDiagnosticLog("backup.import.success", backupCounts(imported.state));
-  ui.modal = { type: "result", status: "success", title: "Import Complete", message: "Selected Backup Data Restored." };
+  ui.modal = { type: "result", status: "success", title: tr("Import Complete"), message: tr("Selected Backup Data Restored.") };
   render();
 }
 function checkAlarms() {
@@ -2723,14 +2771,14 @@ function refreshSearchResults() {
     const folderBox = document.querySelector(".folder-strip.compact-folders");
     const noteBox = document.querySelector(".vault-root-notes");
     const count = document.querySelector(".active-count");
-    if (folderBox) folderBox.innerHTML = folders.map(renderFolderCard).join("") || `<div class="empty-folder-state home-empty-state">No Spaces</div>`;
-    if (noteBox) noteBox.innerHTML = rootNotes.map(renderNoteCard).join("") || `<div class="empty-folder-state home-empty-state">Tap + To Create Memo</div>`;
-    if (count) count.textContent = `${rootNotes.length} Memos`;
+    if (folderBox) folderBox.innerHTML = folders.map(renderFolderCard).join("") || `<div class="empty-folder-state home-empty-state">${tr("No Spaces")}</div>`;
+    if (noteBox) noteBox.innerHTML = rootNotes.map(renderNoteCard).join("") || `<div class="empty-folder-state home-empty-state">${tr("Tap + To Create Memo")}</div>`;
+    if (count) count.textContent = `${rootNotes.length} ${tr("Memos")}`;
   }
   if (ui.view === "folder") {
     const notes = filteredNotes(notesFor(ui.folderId));
     const noteBox = document.querySelector(".folder-note-list");
-    if (noteBox) noteBox.innerHTML = notes.map(renderNoteCard).join("") || `<div class="empty-folder-state">No Memos In This Space</div>`;
+    if (noteBox) noteBox.innerHTML = notes.map(renderNoteCard).join("") || `<div class="empty-folder-state">${tr("No Memos In This Space")}</div>`;
   }
 }
 
@@ -2780,7 +2828,7 @@ function refreshCurrentFolderStrip() {
   const folderBox = ui.view === "folder" ? document.querySelector(".nested-folders") : document.querySelector(".vault-screen .folder-strip.compact-folders");
   if (!folderBox) return;
   const left = folderBox.scrollLeft;
-  folderBox.innerHTML = folders.map(renderFolderCard).join("") || `<div class="empty-folder-state home-empty-state">No Spaces</div>`;
+  folderBox.innerHTML = folders.map(renderFolderCard).join("") || `<div class="empty-folder-state home-empty-state">${tr("No Spaces")}</div>`;
   folderBox.scrollLeft = left;
 }
 function moveNoteToFolder(noteId, folderId, beforeId = null) {
@@ -2815,10 +2863,10 @@ function reorderNoteBefore(noteId, beforeId, placeAfter = false) {
 function refreshCurrentMemoList() {
   if (ui.view === "home") {
     const noteBox = document.querySelector(".vault-root-notes");
-    if (noteBox) noteBox.innerHTML = filteredNotes(notesFor("root")).map(renderNoteCard).join("") || `<div class="empty-folder-state home-empty-state">Tap + To Create Memo</div>`;
+    if (noteBox) noteBox.innerHTML = filteredNotes(notesFor("root")).map(renderNoteCard).join("") || `<div class="empty-folder-state home-empty-state">${tr("Tap + To Create Memo")}</div>`;
   } else if (ui.view === "folder") {
     const noteBox = document.querySelector(".folder-note-list");
-    if (noteBox) noteBox.innerHTML = filteredNotes(notesFor(ui.folderId)).map(renderNoteCard).join("") || `<div class="empty-folder-state">No Memos In This Space</div>`;
+    if (noteBox) noteBox.innerHTML = filteredNotes(notesFor(ui.folderId)).map(renderNoteCard).join("") || `<div class="empty-folder-state">${tr("No Memos In This Space")}</div>`;
   }
 }
 function renderDragLayer() {
@@ -2838,10 +2886,10 @@ function renderDragLayer() {
     ghost.className = `drag-ghost ${drag.type === "folder" ? "folder-drag-ghost" : ""}`;
     if (drag.type === "folder") {
       const folder = state.folders.find((item) => item.id === drag.folderId);
-      ghost.innerHTML = `<strong>${escapeHtml(folder?.name || "Untitled Space")}</strong><span>SmartMemo Space</span>`;
+      ghost.innerHTML = `<strong>${escapeHtml(folder?.name || tr("Untitled Space"))}</strong><span>SmartMemo Space</span>`;
     } else {
       const note = state.notes.find((item) => item.id === drag.noteId);
-      ghost.innerHTML = `<strong>${escapeHtml(note?.title || "Untitled Memo")}</strong><span>${escapeHtml(textFromHtml(note?.bodyHtml || "No Body").slice(0, 42))}</span>`;
+      ghost.innerHTML = `<strong>${escapeHtml(note?.title || tr("Untitled Memo"))}</strong><span>${escapeHtml(textFromHtml(note?.bodyHtml || tr("No Body")).slice(0, 42))}</span>`;
     }
   }
   ghost.style.left = `${drag.x}px`;
@@ -3010,7 +3058,7 @@ function updateMemoDrag(event) {
       folderCard.classList.add("drag-blocked");
       if (ui.drag.blockedFolderId !== folderId) {
         ui.drag.blockedFolderId = folderId;
-        showToast("Unlock This Space Before Moving The Memo.", 2000);
+        showToast(tr("Unlock This Space Before Moving The Memo."), 2000);
       }
     }
   }
@@ -3060,7 +3108,7 @@ function finishMemoDrag(event) {
   if (folderCard) {
     const folderId = folderCard.dataset.longFolder;
     if (folderAllowsMemoDrop(folderId)) moved = moveNoteToFolder(drag.noteId, folderId);
-    else blockedMessage = "Unlock This Space Before Moving The Memo.";
+    else blockedMessage = tr("Unlock This Space Before Moving The Memo.");
   }
   const rootDrop = el?.closest?.('[data-drop-root="true"]');
   if (rootDrop && ui.view === "home") moved = moveNoteToFolder(drag.noteId, null);
@@ -3191,7 +3239,7 @@ function styleSelection(range, datasetKey, datasetValue, styles = {}, resetStyle
   const active = closestStyledNode(range, datasetKey, datasetValue);
   const wrapper = document.createElement("span");
   if (active) {
-    wrapper.dataset[`${datasetKey}Reset`] = datasetValue;
+    wrapper.dataset[`${datasetKey}${tr("Reset")}`] = datasetValue;
     Object.assign(wrapper.style, resetStyles);
   } else {
     wrapper.dataset[datasetKey] = datasetValue;
@@ -3228,6 +3276,11 @@ app.addEventListener("click", async (event) => {
   const target = event.target.closest("[data-action]");
   if (!target) return;
   const action = target.dataset.action;
+  if (action === "language") {
+    setAppLanguage(target.dataset.value);
+    render();
+    return;
+  }
   const id = target.dataset.id;
 
   if (action === "wheel-step") {
@@ -3340,10 +3393,12 @@ app.addEventListener("click", async (event) => {
     return;
   }
 if (action === "back") {
+    if (!(await ensureSavedBeforeLeave())) return;
     discardBlankCurrentNote();
     setView("home", { folderId: null, noteId: null });
   }
   if (action === "back-folder") {
+    if (!(await ensureSavedBeforeLeave())) return;
     discardBlankCurrentNote();
     setView("folder", { noteId: null });
   }
@@ -3355,11 +3410,12 @@ if (action === "back") {
   }
 
   if (action === "dock-vault") {
+    if (!(await ensureSavedBeforeLeave())) return;
     ui.tab = "all";
     ui.search = "";
     setView("home", { folderId: null, noteId: null });
   }
-  if (action === "dock-history") setView("history", { folderId: null, noteId: null });
+  if (action === "dock-history") { if (!(await ensureSavedBeforeLeave())) return; setView("history", { folderId: null, noteId: null }); }
   if (action === "theme") {
     state.settings.theme = state.settings.theme === "light" ? "dark" : "light";
     scheduleSave();
@@ -3378,7 +3434,7 @@ if (action === "back") {
   }
   if (action === "save-note") {
     await saveNow();
-    ui.modal = { type: "result", status: "success", title: "Saved", message: "Memo Is Encrypted Locally." };
+    ui.modal = { type: "result", status: "success", title: tr("Saved"), message: tr("Memo Is Encrypted Locally.") };
     render();
   }
   if (action === "create-menu") {
@@ -3433,12 +3489,12 @@ if (action === "back") {
       ui.longPressFolderId = null;
       return;
     }
-    ui.modal = { type: "confirm", title: "Delete Space", message: "Memos Inside Will Move To Vault.", id, confirmAction: "confirm-delete-folder" };
+    ui.modal = { type: "confirm", title: tr("Delete Space"), message: tr("Memos Inside Will Move To Vault."), id, confirmAction: "confirm-delete-folder" };
     render();
   }
   if (action === "confirm-delete-folder") deleteFolder(id);
   if (action === "delete-note") {
-    ui.modal = { type: "confirm", title: "Delete Memo", message: "Reminder And Password Will Be Removed.", id, confirmAction: "confirm-delete-note" };
+    ui.modal = { type: "confirm", title: tr("Delete Memo"), message: tr("Reminder And Password Will Be Removed."), id, confirmAction: "confirm-delete-note" };
     render();
   }
   if (action === "confirm-delete-note") deleteNote(id);
@@ -3468,7 +3524,7 @@ if (action === "back") {
     }
   }
   if (action === "delete-history") {
-    ui.modal = { type: "confirm", title: "Delete History Memo", message: "This History Memo Will Be Permanently Deleted.", id, confirmAction: "confirm-delete-history" };
+    ui.modal = { type: "confirm", title: tr("Delete History Memo"), message: tr("This History Memo Will Be Permanently Deleted."), id, confirmAction: "confirm-delete-history" };
     render();
     return;
   }
@@ -3543,7 +3599,7 @@ if (action === "back") {
       openUnlockedTarget(target.dataset.target, id);
       return;
     }
-    else ui.modal = { type: "unlock", target: target.dataset.target, id, recover: true, error: "Incorrect Answer" };
+    else ui.modal = { type: "unlock", target: target.dataset.target, id, recover: true, error: tr("Incorrect Answer") };
     render();
   }
   if (action === "backdrop-close" && event.target === target) closeModal();
@@ -3568,7 +3624,7 @@ app.addEventListener("submit", async (event) => {
   if (action === "confirm-import") {
     const data = Object.fromEntries(new FormData(form));
     return applyImportBackup(ui.pendingImport, { folders: Boolean(data.folders), memos: Boolean(data.memos), history: Boolean(data.history) }).catch(() => {
-      ui.modal = { type: "result", status: "error", title: "Import Failed", message: "Backup Could Not Be Restored." };
+      ui.modal = { type: "result", status: "error", title: tr("Import Failed"), message: tr("Backup Could Not Be Restored.") };
       render();
     });
   }
@@ -3614,17 +3670,22 @@ function keepEditorCaretVisible(force = false) {
     const rects = [...range.getClientRects()];
     let caretRect = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect();
     if (!caretRect?.height) {
-      const node = range.startContainer.nodeType === Node.TEXT_NODE ? range.startContainer.parentElement : range.startContainer;
-      caretRect = node?.getBoundingClientRect?.() || caretRect;
+      const probe = range.cloneRange();
+      if (range.startContainer.nodeType === Node.TEXT_NODE && range.startOffset > 0) {
+        probe.setStart(range.startContainer, range.startOffset - 1);
+        caretRect = probe.getBoundingClientRect();
+      } else {
+        const lineHeight = parseFloat(getComputedStyle(body).lineHeight) || 28;
+        const bodyRect = body.getBoundingClientRect();
+        caretRect = { top: bodyRect.top, bottom: bodyRect.top + lineHeight, height: lineHeight };
+      }
     }
     const viewport = window.visualViewport;
     const viewportTop = viewport?.offsetTop || 0;
     const keyboardTop = viewportTop + (viewport?.height || window.innerHeight);
     const scrollerRect = scroller.getBoundingClientRect();
-    const safeTop = Math.max(scrollerRect.top, viewportTop) + 18;
-    const safeBottom = Math.min(scrollerRect.bottom, keyboardTop) - 72;
-    const keyboardInset = Math.max(0, window.innerHeight - keyboardTop);
-    scroller.style.setProperty("--keyboard-inset", `${keyboardInset}px`);
+    const safeTop = Math.max(scrollerRect.top, viewportTop) + 8;
+    const safeBottom = Math.min(scrollerRect.bottom, keyboardTop) - 20;
     if (caretRect.bottom > safeBottom) {
       scroller.scrollTop += caretRect.bottom - safeBottom;
     } else if (caretRect.top < safeTop) {
@@ -3639,6 +3700,23 @@ function keepEditorCaretVisible(force = false) {
 window.visualViewport?.addEventListener("resize", () => keepEditorCaretVisible(false));
 window.visualViewport?.addEventListener("scroll", () => keepEditorCaretVisible(false));
 
+function focusEmptyEditorAtStart(event) {
+  const body = event.target?.closest?.(".editor-body");
+  if (!body || textFromHtml(body.innerHTML).trim() || body.querySelector("img")) return;
+  event.preventDefault();
+  const scroller = body.closest(".memo-scroll-content");
+  body.focus({ preventScroll: true });
+  const range = document.createRange();
+  range.selectNodeContents(body);
+  range.collapse(true);
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+  if (scroller) scroller.scrollTop = 0;
+}
+
+app.addEventListener("pointerdown", focusEmptyEditorAtStart);
+
 imagePicker.addEventListener("change", async () => {
   await addImages([...imagePicker.files]);
   imagePicker.value = "";
@@ -3651,7 +3729,7 @@ backupPicker.addEventListener("change", async () => {
     if (ui.backupPickerMode === "verify") await verifyBackupFile(file);
     else await previewImportBackup(file);
   } catch (error) {
-    ui.modal = { type: "result", status: "error", title: "Import Failed", message: error?.message || "Backup Could Not Be Read." };
+    ui.modal = { type: "result", status: "error", title: tr("Import Failed"), message: error?.message || tr("Backup Could Not Be Read.") };
     render();
   } finally {
     backupPicker.value = "";
@@ -3676,25 +3754,13 @@ app.addEventListener("click", (event) => {
     ui.suppressClick = false;
     return;
   }
-  if (ui.swipe?.noteId && !swipeAction) {
-    const openShell = event.target.closest(`[data-swipe-note="${ui.swipe.noteId}"]`);
-    if (openShell) {
-      const rect = openShell.getBoundingClientRect();
-      const actionEdge = 96;
-      const inDeleteZone = ui.swipe.offset < 0 && event.clientX >= rect.right - actionEdge;
-      const inPinZone = ui.swipe.offset > 0 && event.clientX <= rect.left + actionEdge;
-      if (inDeleteZone || inPinZone) {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        ui.suppressClick = false;
-        if (inDeleteZone) activateSwipeDelete(ui.swipe.noteId);
-        else activateSwipePin(ui.swipe.noteId);
-        return;
-      }
-    }
+  if (ui.swipe?.noteId && ui.swipe.offset && !swipeAction) {
     ui.swipe = null;
-    renderPreservingScroll();
-    event.preventDefault();
+    // Keep the target connected so this click can open the memo normally.
+    document.querySelectorAll('.note-swipe-shell').forEach(shell => {
+      shell.classList.remove('swipe-left', 'swipe-right', 'swipe-open', 'swiping');
+      shell.querySelector('.note-card')?.style.setProperty('--swipe-offset', '0px');
+    });
     return;
   }
   if (!ui.longPressNoteId && !ui.longPressFolderId) return;
@@ -3713,6 +3779,8 @@ app.addEventListener("click", (event) => {
 }, true);
 
 app.addEventListener("pointerdown", (event) => {
+  // A new physical gesture must not inherit suppression from the previous swipe.
+  ui.suppressClick = false;
   const wheelCol = event.target.closest(".wheel-col");
   if (wheelCol) {
     ui.wheelTouch = { key: wheelCol.dataset.wheelKey, startY: event.clientY, lastY: event.clientY };
@@ -3722,10 +3790,7 @@ app.addEventListener("pointerdown", (event) => {
   }
   const revealedAction = event.target.closest(".note-swipe-action");
   if (revealedAction && ui.swipe?.noteId) {
-    ui.swipeTap = {
-      noteId: revealedAction.dataset.id,
-      action: revealedAction.classList.contains("note-swipe-delete") ? "delete" : "pin"
-    };
+    ui.swipeTap = null;
     return;
   }
   const noteCard = event.target.closest("[data-long-note]");
@@ -3733,13 +3798,9 @@ app.addEventListener("pointerdown", (event) => {
   const card = noteCard || folderCard;
   if (!card) return;
   if (noteCard && ui.swipe?.noteId === noteCard.dataset.longNote && ui.swipe.offset) {
-    const shell = noteCard.closest(".note-swipe-shell");
-    const rect = shell?.getBoundingClientRect();
-    const inDeleteZone = rect && ui.swipe.offset < 0 && event.clientX >= rect.right - 96;
-    const inPinZone = rect && ui.swipe.offset > 0 && event.clientX <= rect.left + 96;
-    ui.swipeTap = inDeleteZone || inPinZone
-      ? { noteId: ui.swipe.noteId, action: inDeleteZone ? "delete" : "pin" }
-      : null;
+    ui.swipe.moved = false;
+    ui.swipe.axis = null;
+    ui.swipeTap = null;
     return;
   }
   if (ui.noteMomentumFrame) {
@@ -3886,8 +3947,8 @@ app.addEventListener("pointerup", (event) => {
     ui.swipeTap = null;
     ui.suppressClick = true;
     event.preventDefault();
-    if (tap.action === "delete") activateSwipeDelete(tap.noteId);
-    else activateSwipePin(tap.noteId);
+    // Actions execute once through the click handler, not pointerup and click.
+    ui.suppressClick = false;
     setTimeout(() => { ui.suppressClick = false; }, 650);
     ui.folderPan = null;
     ui.notePan = null;
@@ -3907,6 +3968,8 @@ app.addEventListener("pointerup", (event) => {
     renderPreservingScroll();
     setTimeout(() => { ui.suppressClick = false; }, 650);
   }
+  // A zero-distance pointer gesture is a tap, not an open swipe.
+  if (ui.swipe && !ui.swipe.offset) ui.swipe = null;
   if (ui.notePan?.moved && ui.notePan.scroll && Math.abs(ui.notePan.velocity) > 0.05) {
     const scroll = ui.notePan.scroll;
     let velocity = ui.notePan.velocity;
@@ -3978,7 +4041,9 @@ function armEditorSelectionTools() {
   app.addEventListener("keyup", schedule);
   app.addEventListener("touchend", schedule, { passive: true });
   app.addEventListener("focusin", (event) => {
-    if (event.target?.matches?.(".editor-title, .editor-body")) keepEditorCaretVisible(true);
+    if (event.target?.matches?.(".editor-body") && textFromHtml(event.target.innerHTML).trim()) {
+      keepEditorCaretVisible(false);
+    }
   });
 }
 function finishSplash() {
@@ -3991,7 +4056,10 @@ function finishSplash() {
 }
 
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState !== "visible") return;
+  if (document.visibilityState !== "visible") {
+    if (ui.saveTimer || ui.saveStatus === "error") void flushScheduledSave();
+    return;
+  }
   if (archiveIosDueNotes()) render();
 });
 
@@ -4011,8 +4079,8 @@ async function boot() {
     app.innerHTML = `
       <section class="screen vault-screen">
         <div class="empty-card boot-error">
-          <strong>Unable To Open SmartMemo</strong>
-          <p>Please Reload The App. Your Local Data Was Not Deleted.</p>
+          <strong>${tr("Unable To Open SmartMemo")}</strong>
+          <p>${tr("Please Reload The App. Your Local Data Was Not Deleted.")}</p>
         </div>
       </section>
     `;
