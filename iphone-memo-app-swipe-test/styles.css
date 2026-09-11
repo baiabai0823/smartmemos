@@ -4506,6 +4506,38 @@ html[lang="zh-CN"] .save-state { min-width: 56px; }
 .note-swipe-shell.swipe-right .note-card { border-top-left-radius: 0 !important; border-bottom-left-radius: 0 !important; }
 .save-state.error { color: #b42318 !important; background: #fee4e2 !important; white-space: normal !important; letter-spacing: 0 !important; }
 
+.input-diagnostics-panel {
+  position: absolute;
+  right: 10px;
+  bottom: calc(82px + env(safe-area-inset-bottom, 0px));
+  z-index: 40;
+  width: min(270px, calc(100% - 20px));
+  padding: 9px 10px;
+  border: 1px solid rgba(255, 255, 255, .38);
+  border-radius: 8px;
+  background: rgba(18, 20, 24, .88);
+  color: #f7f7f7;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .2);
+  font: 10px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+  pointer-events: none;
+}
+.input-diagnostics-panel > strong,
+.input-diagnostics-panel > span { display: block; }
+.input-diagnostics-panel > span { color: #b9ff00; margin: 2px 0 5px; }
+.input-diagnostics-panel dl {
+  display: grid;
+  grid-template-columns: 58px 1fr;
+  gap: 2px 7px;
+  margin: 0;
+}
+.input-diagnostics-panel dt { color: rgba(255,255,255,.62); }
+.input-diagnostics-panel dd { margin: 0; overflow-wrap: anywhere; }
+.input-diagnostics-card .muted { margin: 4px 12px 0 0; line-height: 1.45; }
+.input-diagnostics-card .theme-mini-toggle.active {
+  color: #101216;
+  background: var(--gold);
+}
+
 .history-list,
 .history-list .history-card,
 .history-list .history-card * {

@@ -46,7 +46,8 @@ let state = {
   history: [],
   settings: {
     theme: "light",
-    cardInteraction: "longpress"
+    cardInteraction: "longpress",
+    inputDiagnostics: false
   }
 };
 
@@ -114,6 +115,10 @@ let ui = {
   swipeTap: null,
   suppressClick: false
 };
+
+let editorDiagnosticSnapshot = null;
+let editorDiagnosticLastLogAt = 0;
+let editorProgrammaticScrollUntil = 0;
 
 function uiSvg(type) {
   const icons = {
@@ -332,7 +337,7 @@ function normalizeState() {
   state.folders = Array.isArray(state.folders) ? state.folders : [];
   state.notes = Array.isArray(state.notes) ? state.notes : [];
   state.history = Array.isArray(state.history) ? state.history.filter((entry) => entry?.type !== "version") : [];
-  state.settings = { theme: "light", cardInteraction: "longpress", ...(state.settings || {}) };
+  state.settings = { theme: "light", cardInteraction: "longpress", inputDiagnostics: false, ...(state.settings || {}) };
   plainPasswords = mergePasswordVault(state.passwordVault || {}, plainPasswords);
   delete state.passwordVault;
   state.folders.forEach((folder) => {
@@ -413,7 +418,11 @@ function addDiagnosticLog(event, detail = {}) {
   });
   const items = readDiagnosticLog();
   items.push({ at: nowIso(), event, detail: clean });
-  localStorage.setItem(DIAGNOSTIC_LOG_KEY, JSON.stringify(items.slice(-240)));
+  try {
+    localStorage.setItem(DIAGNOSTIC_LOG_KEY, JSON.stringify(items.slice(-240)));
+  } catch {
+    // Diagnostics must never interfere with memo editing or persistence.
+  }
 }
 
 function nativeDiagnostics() {
@@ -511,10 +520,12 @@ function renderToast() {
   app.insertAdjacentHTML("beforeend", `<div class="smart-toast">${escapeHtml(ui.toast.message)}</div>`);
 }
 
-function exportDiagnosticLog() {
+async function exportDiagnosticLog() {
   const payload = {
     exportedAt: nowIso(),
     app: "SmartMemo",
+    diagnosticSchema: "input-geometry-v1",
+    privacy: "No memo title, body, password, key press, or image data is recorded.",
     userAgent: navigator.userAgent,
     native: nativeDiagnostics(),
     logs: readDiagnosticLog()
@@ -522,7 +533,7 @@ function exportDiagnosticLog() {
   const text = JSON.stringify(payload, null, 2);
   const fileName = `SmartMemo-diagnostics-${Date.now()}.json`;
   try {
-    const nativeResult = nativeSaveBackup(fileName, text);
+    const nativeResult = nativeSaveBackup(fileName, text) || await iosSaveBackup(fileName, text);
     if (nativeResult) {
       ui.modal = { type: "result", status: "success", title: tr("Diagnostics Exported"), message: tr("Diagnostic Log Saved On This Phone."), path: nativeResult.path };
       render();
@@ -1037,6 +1048,7 @@ function renderEditor() {
                 </span>
               </div>
               ${renderImageTray(note)}
+              ${state.settings.inputDiagnostics ? `<aside class="input-diagnostics-panel" data-input-diagnostics aria-live="polite"></aside>` : ""}
               <footer class="memo-control">
                 <span>${tr("TACTICAL CONTROL CENTER")}</span>
                 <div class="editor-toolbar tool-dock">
@@ -1063,6 +1075,7 @@ function renderEditor() {
       }
     </section>
   `;
+  if (accessible && state.settings.inputDiagnostics) requestAnimationFrame(() => captureInputDiagnostics("editor-render"));
 }
 
 function renderSaveStatus() {
@@ -1155,6 +1168,15 @@ function renderSettings() {
             <div class="interaction-switch" role="group" aria-label="${tr("Memo card actions")}">
               <button class="${state.settings.cardInteraction === "longpress" ? "active" : ""}" data-action="card-interaction" data-value="longpress">${tr("Long Press")}</button>
               <button class="${state.settings.cardInteraction === "swipe" ? "active" : ""}" data-action="card-interaction" data-value="swipe">${tr("Swipe")}</button>
+            </div>
+          </div>
+          <div class="settings-card input-diagnostics-card">
+            <div class="settings-inline-head">
+              <div>
+                <h3>${appLanguage === "zh-CN" ? "输入诊断" : "Input Diagnostics"}</h3>
+                <p class="muted">${appLanguage === "zh-CN" ? "只记录键盘、视口、滚动和光标尺寸，不记录文字。" : "Records only keyboard, viewport, scroll and caret geometry. No text is recorded."}</p>
+              </div>
+              <button class="theme-mini-toggle ${state.settings.inputDiagnostics ? "active" : ""}" data-action="input-diagnostics" aria-pressed="${Boolean(state.settings.inputDiagnostics)}">${state.settings.inputDiagnostics ? "ON" : "OFF"}</button>
             </div>
           </div>
           <div class="settings-card backup-card">
@@ -3428,6 +3450,12 @@ if (action === "back") {
     scheduleSave();
     render();
   }
+  if (action === "input-diagnostics") {
+    state.settings.inputDiagnostics = !state.settings.inputDiagnostics;
+    addDiagnosticLog("input.diagnostics.toggle", { enabled: state.settings.inputDiagnostics });
+    scheduleSave();
+    render();
+  }
   if (action === "tab") {
     ui.tab = id;
     render();
@@ -3579,7 +3607,7 @@ if (action === "back") {
     ui.modal = { type: "securityCenter" };
     render();
   }
-  if (action === "export-diagnostics") exportDiagnosticLog();
+  if (action === "export-diagnostics") void exportDiagnosticLog();
 
 
   if (action === "snooze-alarm") snoozeAlarm(id);
@@ -3657,6 +3685,67 @@ app.addEventListener("input", (event) => {
   }
 });
 
+function roundedMetric(value) {
+  return Number.isFinite(Number(value)) ? Math.round(Number(value) * 10) / 10 : null;
+}
+
+function currentCaretRect(body) {
+  const selection = window.getSelection();
+  if (!body || !selection?.rangeCount || !selection.isCollapsed) return null;
+  const range = selection.getRangeAt(0);
+  if (!body.contains(range.startContainer)) return null;
+  const rects = [...range.getClientRects()];
+  const rect = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect();
+  if (rect?.height) return rect;
+  if (range.startContainer.nodeType === Node.TEXT_NODE && range.startOffset > 0) {
+    const probe = range.cloneRange();
+    probe.setStart(range.startContainer, range.startOffset - 1);
+    const probeRect = probe.getBoundingClientRect();
+    if (probeRect?.height) return probeRect;
+  }
+  return null;
+}
+
+function captureInputDiagnostics(trigger, extra = {}, log = true) {
+  if (!state.settings.inputDiagnostics || ui.view !== "editor") return null;
+  const body = document.querySelector(".editor-body");
+  const scroller = document.querySelector(".memo-scroll-content");
+  if (!body || !scroller) return null;
+  const viewport = window.visualViewport;
+  const caret = currentCaretRect(body);
+  const scrollerRect = scroller.getBoundingClientRect();
+  const viewportHeight = viewport?.height || window.innerHeight;
+  const viewportTop = viewport?.offsetTop || 0;
+  const snapshot = {
+    trigger,
+    innerHeight: roundedMetric(window.innerHeight),
+    viewportHeight: roundedMetric(viewportHeight),
+    viewportTop: roundedMetric(viewportTop),
+    keyboardHeight: roundedMetric(Math.max(0, window.innerHeight - viewportHeight - viewportTop)),
+    scrollTop: roundedMetric(scroller.scrollTop),
+    scrollHeight: roundedMetric(scroller.scrollHeight),
+    clientHeight: roundedMetric(scroller.clientHeight),
+    scrollerTop: roundedMetric(scrollerRect.top),
+    scrollerBottom: roundedMetric(scrollerRect.bottom),
+    caretTop: roundedMetric(caret?.top),
+    caretBottom: roundedMetric(caret?.bottom),
+    caretHeight: roundedMetric(caret?.height),
+    ...extra
+  };
+  editorDiagnosticSnapshot = snapshot;
+  const panel = document.querySelector("[data-input-diagnostics]");
+  if (panel) {
+    const value = (key) => snapshot[key] == null ? "-" : snapshot[key];
+    panel.innerHTML = `<strong>INPUT DIAGNOSTICS</strong><span>${escapeHtml(trigger)}</span><dl><dt>keyboard</dt><dd>${value("keyboardHeight")}</dd><dt>viewport</dt><dd>${value("viewportHeight")} + ${value("viewportTop")}</dd><dt>scroll</dt><dd>${value("scrollTop")} / ${value("scrollHeight")}</dd><dt>caret</dt><dd>${value("caretTop")} - ${value("caretBottom")} (${value("caretHeight")})</dd></dl>`;
+  }
+  const now = Date.now();
+  if (log && now - editorDiagnosticLastLogAt >= 120) {
+    editorDiagnosticLastLogAt = now;
+    addDiagnosticLog(`input.${trigger}`, snapshot);
+  }
+  return snapshot;
+}
+
 function keepEditorCaretVisible(force = false) {
   if (!IS_NATIVE_IOS) return;
   if (!force && Date.now() - ui.lastEditorInputAt > 350) return;
@@ -3667,18 +3756,10 @@ function keepEditorCaretVisible(force = false) {
     if (!body || !scroller || !selection?.rangeCount || !selection.isCollapsed) return;
     const range = selection.getRangeAt(0);
     if (!body.contains(range.startContainer)) return;
-    const rects = [...range.getClientRects()];
-    let caretRect = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect();
-    if (!caretRect?.height) {
-      const probe = range.cloneRange();
-      if (range.startContainer.nodeType === Node.TEXT_NODE && range.startOffset > 0) {
-        probe.setStart(range.startContainer, range.startOffset - 1);
-        caretRect = probe.getBoundingClientRect();
-      } else {
-        const lineHeight = parseFloat(getComputedStyle(body).lineHeight) || 28;
-        const bodyRect = body.getBoundingClientRect();
-        caretRect = { top: bodyRect.top, bottom: bodyRect.top + lineHeight, height: lineHeight };
-      }
+    const caretRect = currentCaretRect(body);
+    if (!caretRect) {
+      captureInputDiagnostics("caret-unavailable", { force }, true);
+      return;
     }
     const viewport = window.visualViewport;
     const viewportTop = viewport?.offsetTop || 0;
@@ -3686,10 +3767,27 @@ function keepEditorCaretVisible(force = false) {
     const scrollerRect = scroller.getBoundingClientRect();
     const safeTop = Math.max(scrollerRect.top, viewportTop) + 8;
     const safeBottom = Math.min(scrollerRect.bottom, keyboardTop) - 20;
+    const before = scroller.scrollTop;
+    let delta = 0;
     if (caretRect.bottom > safeBottom) {
-      scroller.scrollTop += caretRect.bottom - safeBottom;
-    } else if (caretRect.top < safeTop) {
-      scroller.scrollTop -= safeTop - caretRect.top;
+      delta = caretRect.bottom - safeBottom;
+    } else if (force && caretRect.top < safeTop) {
+      delta = -(safeTop - caretRect.top);
+    }
+    if (Math.abs(delta) >= 1) {
+      editorProgrammaticScrollUntil = Date.now() + 180;
+      scroller.scrollTop += delta;
+      captureInputDiagnostics("program-scroll", {
+        force,
+        reason: delta > 0 ? "caret-below-keyboard" : "caret-above-editor",
+        requestedDelta: roundedMetric(delta),
+        beforeScrollTop: roundedMetric(before),
+        afterScrollTop: roundedMetric(scroller.scrollTop),
+        safeTop: roundedMetric(safeTop),
+        safeBottom: roundedMetric(safeBottom)
+      }, true);
+    } else {
+      captureInputDiagnostics("caret-visible", { force, safeTop: roundedMetric(safeTop), safeBottom: roundedMetric(safeBottom) }, false);
     }
   });
   run();
@@ -3697,8 +3795,27 @@ function keepEditorCaretVisible(force = false) {
   ui.caretFollowTimer = setTimeout(run, 90);
 }
 
-window.visualViewport?.addEventListener("resize", () => keepEditorCaretVisible(false));
-window.visualViewport?.addEventListener("scroll", () => keepEditorCaretVisible(false));
+window.visualViewport?.addEventListener("resize", () => {
+  captureInputDiagnostics("viewport-resize");
+  keepEditorCaretVisible(false);
+});
+window.visualViewport?.addEventListener("scroll", () => {
+  captureInputDiagnostics("viewport-scroll");
+  keepEditorCaretVisible(false);
+});
+
+app.addEventListener("scroll", (event) => {
+  if (!event.target?.matches?.(".memo-scroll-content")) return;
+  captureInputDiagnostics(Date.now() <= editorProgrammaticScrollUntil ? "scroll-program-result" : "scroll-system-or-user");
+}, true);
+
+app.addEventListener("focusin", (event) => {
+  if (event.target?.matches?.(".editor-title, .editor-body")) captureInputDiagnostics(event.target.matches(".editor-title") ? "focus-title" : "focus-body");
+});
+
+app.addEventListener("focusout", (event) => {
+  if (event.target?.matches?.(".editor-title, .editor-body")) captureInputDiagnostics(event.target.matches(".editor-title") ? "blur-title" : "blur-body");
+});
 
 function focusEmptyEditorAtStart(event) {
   const body = event.target?.closest?.(".editor-body");
@@ -4035,7 +4152,10 @@ function armEditorSelectionTools() {
     saveSelection();
   }, 0);
   document.addEventListener("selectionchange", () => {
-    if (document.querySelector(".editor-body")) schedule();
+    if (document.querySelector(".editor-body")) {
+      schedule();
+      captureInputDiagnostics("selection-change");
+    }
   });
   app.addEventListener("mouseup", schedule);
   app.addEventListener("keyup", schedule);
