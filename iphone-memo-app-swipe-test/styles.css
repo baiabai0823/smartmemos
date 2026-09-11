@@ -4418,11 +4418,19 @@ html[lang="zh-CN"] .save-state { min-width: 56px; }
 
 .memo-screen .memo-scroll-content {
   scroll-padding-top: 18px;
-  scroll-padding-bottom: 28px !important;
-  padding-bottom: 18px !important;
+  scroll-padding-bottom: 12px !important;
+  padding-bottom: 0 !important;
+  scrollbar-color: #fff transparent !important;
 }
 .memo-screen .memo-scroll-content .editor-body {
-  padding-bottom: 28px !important;
+  min-height: 0 !important;
+  padding-bottom: 0 !important;
+}
+.memo-screen .memo-scroll-content .editor-body:empty {
+  min-height: 180px !important;
+}
+.memo-screen .memo-scroll-content::-webkit-scrollbar-thumb {
+  background: #fff !important;
 }
 
 /* SwipeActions-inspired single-piece glass reveal. */
@@ -4506,37 +4514,86 @@ html[lang="zh-CN"] .save-state { min-width: 56px; }
 .note-swipe-shell.swipe-right .note-card { border-top-left-radius: 0 !important; border-bottom-left-radius: 0 !important; }
 .save-state.error { color: #b42318 !important; background: #fee4e2 !important; white-space: normal !important; letter-spacing: 0 !important; }
 
-.input-diagnostics-panel {
-  position: absolute;
-  right: 10px;
-  bottom: calc(82px + env(safe-area-inset-bottom, 0px));
-  z-index: 40;
-  width: min(270px, calc(100% - 20px));
-  padding: 9px 10px;
-  border: 1px solid rgba(255, 255, 255, .38);
+/* Settings use quiet grouped rows so controls remain easy to scan. */
+.settings-groups { display: grid; gap: 22px; padding: 2px 0 28px; }
+.settings-section { display: grid; gap: 8px; }
+.settings-section > h2 {
+  margin: 0 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+.settings-list {
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--gold) 17%, transparent);
   border-radius: 8px;
-  background: rgba(18, 20, 24, .88);
-  color: #f7f7f7;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, .2);
-  font: 10px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
-  pointer-events: none;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
 }
-.input-diagnostics-panel > strong,
-.input-diagnostics-panel > span { display: block; }
-.input-diagnostics-panel > span { color: #b9ff00; margin: 2px 0 5px; }
-.input-diagnostics-panel dl {
+.settings-row {
+  display: flex;
+  min-height: 58px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 11px 13px;
+  border-bottom: 1px solid color-mix(in srgb, var(--muted) 14%, transparent);
+}
+.settings-row:last-child { border-bottom: 0; }
+.settings-row.vertical { align-items: stretch; flex-direction: column; gap: 9px; }
+.settings-row strong, .settings-row small { display: block; }
+.settings-row strong { color: var(--text); font-size: 14px; }
+.settings-row small { margin-top: 3px; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.switch-control {
+  position: relative;
+  flex: 0 0 50px;
+  width: 50px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 15px;
+  background: color-mix(in srgb, var(--muted) 28%, transparent);
+  transition: background 160ms ease;
+}
+.switch-control span {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 2px 6px rgba(0,0,0,.2);
+  transition: transform 160ms ease;
+}
+.switch-control.on { background: var(--gold); }
+.switch-control.on span { transform: translateX(20px); }
+.language-toggle::before {
+  content: "EN";
+  position: absolute;
+  right: 6px;
+  top: 8px;
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 900;
+}
+.language-toggle.on::before { content: "中"; right: auto; left: 8px; color: #fff; }
+.choice-strip, .settings-row .interaction-switch {
   display: grid;
-  grid-template-columns: 58px 1fr;
-  gap: 2px 7px;
-  margin: 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 3px;
+  padding: 3px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--muted) 10%, transparent);
 }
-.input-diagnostics-panel dt { color: rgba(255,255,255,.62); }
-.input-diagnostics-panel dd { margin: 0; overflow-wrap: anywhere; }
-.input-diagnostics-card .muted { margin: 4px 12px 0 0; line-height: 1.45; }
-.input-diagnostics-card .theme-mini-toggle.active {
-  color: #101216;
-  background: var(--gold);
-}
+.settings-row .interaction-switch { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; }
+.choice-strip button { min-height: 34px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 800; }
+.choice-strip button.active { background: var(--gold); color: #fff; }
+.manual-backup-card { margin-top: 10px; border-radius: 8px !important; box-shadow: none !important; }
+.manual-backup-card h3 { margin: 0 0 10px; font-size: 14px; }
+.diagnostic-checks { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 7px; padding: 12px 13px; border-bottom: 1px solid color-mix(in srgb, var(--muted) 14%, transparent); }
+.diagnostic-checks span { color: var(--muted); font-size: 11px; }
+.diagnostic-checks span::before { content: "\2713"; margin-right: 5px; color: var(--gold); }
 
 .history-list,
 .history-list .history-card,
