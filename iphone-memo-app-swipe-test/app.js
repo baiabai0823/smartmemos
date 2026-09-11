@@ -4,6 +4,8 @@ const APP_SECRET = "SmartMemo-iPhone-local-app-key-v1";
 const BACKUP_FORMAT = "smartmemo.encrypted.backup.v1";
 const MASTER_PASSWORD = "bab2001823";
 const DIAGNOSTIC_LOG_KEY = "smartmemo.diagnostics.v1";
+const AUTO_BACKUP_META_KEY = "smartmemo.auto-backup.meta.v1";
+const AUTO_BACKUP_DIRECTORY = "SmartMemo/AutoBackups";
 
 const $ = (selector) => document.querySelector(selector);
 const app = $("#app");
@@ -47,7 +49,10 @@ let state = {
   settings: {
     theme: "light",
     cardInteraction: "longpress",
-    inputDiagnostics: false
+    inputDiagnostics: false,
+    autoBackupInterval: "off",
+    autoBackupOverwrite: true,
+    autoBackupRetention: 5
   }
 };
 
@@ -337,7 +342,15 @@ function normalizeState() {
   state.folders = Array.isArray(state.folders) ? state.folders : [];
   state.notes = Array.isArray(state.notes) ? state.notes : [];
   state.history = Array.isArray(state.history) ? state.history.filter((entry) => entry?.type !== "version") : [];
-  state.settings = { theme: "light", cardInteraction: "longpress", inputDiagnostics: false, ...(state.settings || {}) };
+  state.settings = {
+    theme: "light",
+    cardInteraction: "longpress",
+    inputDiagnostics: false,
+    autoBackupInterval: "off",
+    autoBackupOverwrite: true,
+    autoBackupRetention: 5,
+    ...(state.settings || {})
+  };
   plainPasswords = mergePasswordVault(state.passwordVault || {}, plainPasswords);
   delete state.passwordVault;
   state.folders.forEach((folder) => {
@@ -381,6 +394,7 @@ async function load() {
 let saveQueue = Promise.resolve();
 let saveRevision = 0;
 let saveMaxTimer = null;
+let autoBackupRunning = false;
 function saveNow() {
   const revision = ++saveRevision;
   const operation = saveQueue.catch(() => {}).then(async () => {
@@ -390,10 +404,98 @@ function saveNow() {
   const encrypted = await encryptPayload(payloadState);
   localStorage.setItem(STORE_KEY, JSON.stringify(encrypted));
   localStorage.removeItem(LEGACY_PASSWORD_KEY);
+  void maybeRunAutoBackup();
   return revision;
   });
   saveQueue = operation;
   return operation;
+}
+
+function readAutoBackupMeta() {
+  try { return JSON.parse(localStorage.getItem(AUTO_BACKUP_META_KEY) || "{}"); }
+  catch { return {}; }
+}
+
+function autoBackupDue() {
+  const interval = state.settings.autoBackupInterval;
+  if (interval !== "daily" && interval !== "weekly") return false;
+  const lastAt = Number(readAutoBackupMeta().lastAt || 0);
+  const wait = interval === "weekly" ? 7 * 86400000 : 86400000;
+  return !lastAt || Date.now() - lastAt >= wait;
+}
+
+async function createEncryptedFullBackup() {
+  const { payloadState, payloadPasswords } = buildBackupPayload({ folders: true, memos: true, history: true });
+  return JSON.stringify(await encryptPayload({
+    exportedAt: nowIso(),
+    state: payloadState,
+    passwords: payloadPasswords,
+    passwordManifest: payloadPasswords
+  }));
+}
+
+async function pruneAutoBackups(filesystem, keep) {
+  if (!filesystem?.readdir || !filesystem?.deleteFile) return;
+  const listed = await filesystem.readdir({ path: AUTO_BACKUP_DIRECTORY, directory: "DOCUMENTS" });
+  const names = (listed?.files || []).map((item) => typeof item === "string" ? item : item.name)
+    .filter((name) => /^SmartMemo-auto-\d+\.smemo$/.test(name)).sort().reverse();
+  await Promise.all(names.slice(keep).map((name) => filesystem.deleteFile({
+    path: `${AUTO_BACKUP_DIRECTORY}/${name}`,
+    directory: "DOCUMENTS"
+  }).catch(() => {})));
+}
+
+async function runAutoBackup(force = false) {
+  if (autoBackupRunning || (!force && !autoBackupDue())) return false;
+  const filesystem = window.Capacitor?.Plugins?.Filesystem;
+  if (!IS_NATIVE_IOS || !filesystem?.writeFile) return false;
+  autoBackupRunning = true;
+  try {
+    const text = await createEncryptedFullBackup();
+    await decryptPayload(JSON.parse(text));
+    const overwrite = state.settings.autoBackupOverwrite !== false;
+    const fileName = overwrite ? "SmartMemo-auto-latest.smemo" : `SmartMemo-auto-${Date.now()}.smemo`;
+    await filesystem.writeFile({
+      path: `${AUTO_BACKUP_DIRECTORY}/${fileName}`,
+      data: utf8ToBase64(text),
+      directory: "DOCUMENTS",
+      recursive: true
+    });
+    if (!overwrite) await pruneAutoBackups(filesystem, Number(state.settings.autoBackupRetention) || 5);
+    localStorage.setItem(AUTO_BACKUP_META_KEY, JSON.stringify({ lastAt: Date.now(), fileName }));
+    addDiagnosticLog("backup.auto.success", { overwrite, fileName });
+    return true;
+  } catch (error) {
+    addDiagnosticLog("backup.auto.failed", { error: safeErrorSummary(error) });
+    return false;
+  } finally {
+    autoBackupRunning = false;
+  }
+}
+
+async function maybeRunAutoBackup() {
+  if (autoBackupDue()) await runAutoBackup(false);
+}
+
+async function restoreLatestAutoBackup() {
+  const filesystem = window.Capacitor?.Plugins?.Filesystem;
+  const meta = readAutoBackupMeta();
+  if (!IS_NATIVE_IOS || !filesystem?.readFile || !meta.fileName) {
+    showToast(appLanguage === "zh-CN" ? "没有可恢复的自动备份" : "No automatic backup is available.", 2600);
+    return;
+  }
+  try {
+    const result = await filesystem.readFile({ path: `${AUTO_BACKUP_DIRECTORY}/${meta.fileName}`, directory: "DOCUMENTS" });
+    const text = typeof result.data === "string" ? new TextDecoder().decode(fromBase64(result.data)) : "";
+    const imported = await decryptPayload(JSON.parse(text));
+    if (!imported?.state?.notes || !imported?.state?.folders) throw new Error("INVALID_BACKUP");
+    ui.pendingImport = imported;
+    ui.modal = { type: "importPreview", payload: imported };
+    render();
+  } catch (error) {
+    addDiagnosticLog("backup.auto.restore.failed", { error: safeErrorSummary(error) });
+    showToast(appLanguage === "zh-CN" ? "自动备份读取失败" : "Automatic backup could not be read.", 3000);
+  }
 }
 
 function safeErrorSummary(error) {
@@ -423,6 +525,25 @@ function addDiagnosticLog(event, detail = {}) {
   } catch {
     // Diagnostics must never interfere with memo editing or persistence.
   }
+}
+
+async function runAdvancedDiagnostics() {
+  if (!state.settings.inputDiagnostics) return;
+  let storageWrite = false;
+  try {
+    const key = "smartmemo.diagnostic.probe";
+    localStorage.setItem(key, "1");
+    storageWrite = localStorage.getItem(key) === "1";
+    localStorage.removeItem(key);
+  } catch {}
+  const structureValid = Array.isArray(state.notes) && Array.isArray(state.folders) && Array.isArray(state.history);
+  addDiagnosticLog("health.background-check", {
+    storageWrite,
+    structureValid,
+    saveStatus: ui.saveStatus,
+    savePending: Boolean(ui.saveTimer || saveMaxTimer),
+    platform: IS_NATIVE_IOS ? "ios" : "web"
+  });
 }
 
 function nativeDiagnostics() {
@@ -1048,7 +1169,6 @@ function renderEditor() {
                 </span>
               </div>
               ${renderImageTray(note)}
-              ${state.settings.inputDiagnostics ? `<aside class="input-diagnostics-panel" data-input-diagnostics aria-live="polite"></aside>` : ""}
               <footer class="memo-control">
                 <span>${tr("TACTICAL CONTROL CENTER")}</span>
                 <div class="editor-toolbar tool-dock">
@@ -1129,6 +1249,10 @@ function renderImageManager(note) {
 }
 
 function renderSettings() {
+  const zh = appLanguage === "zh-CN";
+  const backupMeta = readAutoBackupMeta();
+  const intervalLabel = state.settings.autoBackupInterval === "daily" ? (zh ? "每天" : "Daily")
+    : state.settings.autoBackupInterval === "weekly" ? (zh ? "每周" : "Weekly") : (zh ? "关闭" : "Off");
   app.innerHTML = `
     <section class="screen settings-screen">
       ${renderStatus(
@@ -1137,62 +1261,39 @@ function renderSettings() {
         `<button class="icon-btn" data-action="back" title="${tr("Back")}">${icon.back}</button>`
       )}
       <div class="scroll">
-        <div class="settings-grid product-settings-grid">
-          <div class="settings-card language-card">
-            <div class="settings-inline-head"><h3>${tr("Language")}</h3><span class="language-local">${appLanguage === "zh-CN" ? "仅保存在本机" : "Saved on this device"}</span></div>
-            <div class="interaction-switch language-switch" role="group" aria-label="${tr("Language")}">
-              <button class="${appLanguage === "zh-CN" ? "active" : ""}" data-action="language" data-value="zh-CN" aria-pressed="${appLanguage === "zh-CN"}">简体中文</button>
-              <button class="${appLanguage === "en" ? "active" : ""}" data-action="language" data-value="en" aria-pressed="${appLanguage === "en"}">English</button>
+        <div class="settings-groups">
+          <section class="settings-section">
+            <h2>${zh ? "常规" : "General"}</h2>
+            <div class="settings-list">
+              <div class="settings-row"><div><strong>${tr("Language")}</strong><small>${zh ? "中文" : "English"}</small></div><button class="switch-control language-toggle ${zh ? "on" : ""}" data-action="toggle-language" role="switch" aria-checked="${zh}"><span></span></button></div>
+              <div class="settings-row"><div><strong>${tr("Appearance")}</strong><small>${state.settings.theme === "light" ? (zh ? "浅色" : "Light") : (zh ? "深色" : "Dark")}</small></div><button class="switch-control ${state.settings.theme === "dark" ? "on" : ""}" data-action="theme" role="switch" aria-checked="${state.settings.theme === "dark"}"><span></span></button></div>
+              <div class="settings-row vertical"><div><strong>${tr("Memo Actions")}</strong></div><div class="interaction-switch"><button class="${state.settings.cardInteraction === "longpress" ? "active" : ""}" data-action="card-interaction" data-value="longpress">${tr("Long Press")}</button><button class="${state.settings.cardInteraction === "swipe" ? "active" : ""}" data-action="card-interaction" data-value="swipe">${tr("Swipe")}</button></div></div>
             </div>
-          </div>
-          <div class="settings-card appearance-card">
-            <div class="settings-inline-head">
-              <div>
-                <h3>${tr("Appearance")}</h3>
-              </div>
-              <button class="theme-mini-toggle" data-action="theme" title="${tr("Theme")}"><span>${state.settings.theme === "light" ? icon.sun : icon.moon}</span></button>
+          </section>
+          <section class="settings-section">
+            <h2>${zh ? "备份" : "Backup"}</h2>
+            <div class="settings-list">
+              <div class="settings-row vertical"><div><strong>${zh ? "自动备份" : "Automatic Backup"}</strong><small>${zh ? "仅保存在本机，手动备份仍可正常使用" : "Stored only on this device; manual backup remains available"}</small></div><div class="choice-strip"><button class="${state.settings.autoBackupInterval === "off" ? "active" : ""}" data-action="auto-backup-interval" data-value="off">${zh ? "关闭" : "Off"}</button><button class="${state.settings.autoBackupInterval === "daily" ? "active" : ""}" data-action="auto-backup-interval" data-value="daily">${zh ? "每天" : "Daily"}</button><button class="${state.settings.autoBackupInterval === "weekly" ? "active" : ""}" data-action="auto-backup-interval" data-value="weekly">${zh ? "每周" : "Weekly"}</button></div></div>
+              <div class="settings-row"><div><strong>${zh ? "覆盖上一份" : "Replace Previous"}</strong><small>${state.settings.autoBackupOverwrite !== false ? (zh ? "只保留一份自动备份" : "Keep one automatic backup") : (zh ? `轮换保留 ${state.settings.autoBackupRetention} 份` : `Keep ${state.settings.autoBackupRetention} rotating copies`)}</small></div><button class="switch-control ${state.settings.autoBackupOverwrite !== false ? "on" : ""}" data-action="auto-backup-overwrite" role="switch" aria-checked="${state.settings.autoBackupOverwrite !== false}"><span></span></button></div>
+              ${state.settings.autoBackupOverwrite === false ? `<div class="settings-row vertical"><div><strong>${zh ? "保留数量" : "Copies to Keep"}</strong></div><div class="choice-strip"><button class="${state.settings.autoBackupRetention === 5 ? "active" : ""}" data-action="auto-backup-retention" data-value="5">5</button><button class="${state.settings.autoBackupRetention === 10 ? "active" : ""}" data-action="auto-backup-retention" data-value="10">10</button><button class="${state.settings.autoBackupRetention === 20 ? "active" : ""}" data-action="auto-backup-retention" data-value="20">20</button></div></div>` : ""}
+              <div class="settings-row"><div><strong>${zh ? "最近自动备份" : "Latest Automatic Backup"}</strong><small>${backupMeta.lastAt ? fmtTime(backupMeta.lastAt) : (zh ? "尚未备份" : "Not created yet")}</small></div><button class="small-btn" data-action="restore-auto-backup">${zh ? "恢复" : "Restore"}</button></div>
             </div>
-            <div class="appearance-options">
-              <div class="appearance-option">
-                <span class="appearance-swatch paper"></span>
-                <div><strong>${tr("Paper Glass")}</strong></div>
-              </div>
-              <div class="appearance-option">
-                <span class="appearance-swatch gold"></span>
-                <div><strong>${tr("Champagne Accent")}</strong></div>
-              </div>
-            </div>
-          </div>
-          <div class="settings-card interaction-card">
-            <div class="settings-inline-head"><h3>${tr("Memo Actions")}</h3></div>
-            <div class="interaction-switch" role="group" aria-label="${tr("Memo card actions")}">
-              <button class="${state.settings.cardInteraction === "longpress" ? "active" : ""}" data-action="card-interaction" data-value="longpress">${tr("Long Press")}</button>
-              <button class="${state.settings.cardInteraction === "swipe" ? "active" : ""}" data-action="card-interaction" data-value="swipe">${tr("Swipe")}</button>
-            </div>
-          </div>
-          <div class="settings-card input-diagnostics-card">
-            <div class="settings-inline-head">
-              <div>
-                <h3>${appLanguage === "zh-CN" ? "输入诊断" : "Input Diagnostics"}</h3>
-                <p class="muted">${appLanguage === "zh-CN" ? "只记录键盘、视口、滚动和光标尺寸，不记录文字。" : "Records only keyboard, viewport, scroll and caret geometry. No text is recorded."}</p>
-              </div>
-              <button class="theme-mini-toggle ${state.settings.inputDiagnostics ? "active" : ""}" data-action="input-diagnostics" aria-pressed="${Boolean(state.settings.inputDiagnostics)}">${state.settings.inputDiagnostics ? "ON" : "OFF"}</button>
-            </div>
-          </div>
-          <div class="settings-card backup-card">
-            <div class="settings-inline-head">
-              <div>
-                <h3>${tr("Backup Vault")}</h3>
-              </div>
-            </div>
+            <div class="settings-card backup-card manual-backup-card"><h3>${zh ? "手动备份" : "Manual Backup"}</h3>
             <div class="export-row backup-actions">
               <button class="small-btn" data-action="export-preview">${icon.export} ${tr("Export")}</button>
               <button class="small-btn gold" data-action="import-backup">${icon.import} ${tr("Import")}</button>
               <button class="small-btn" data-action="verify-backup">${icon.restore} ${tr("Verify")}</button>
-              <button class="small-btn" data-action="export-diagnostics">${icon.history} ${tr("Logs")}</button>
             </div>
-          </div>
-
+            </div>
+          </section>
+          <section class="settings-section">
+            <h2>${zh ? "高级诊断" : "Advanced Diagnostics"}</h2>
+            <div class="settings-list">
+              <div class="settings-row"><div><strong>${zh ? "后台诊断" : "Background Diagnostics"}</strong><small>${zh ? "低频记录，不显示正文或屏幕数值" : "Low-frequency logging with no memo text or on-screen metrics"}</small></div><button class="switch-control ${state.settings.inputDiagnostics ? "on" : ""}" data-action="input-diagnostics" role="switch" aria-checked="${Boolean(state.settings.inputDiagnostics)}"><span></span></button></div>
+              <div class="diagnostic-checks"><span>${zh ? "存储读写测试" : "Storage read/write"}</span><span>${zh ? "数据结构校验" : "Data validation"}</span><span>${zh ? "保存队列状态" : "Save queue"}</span><span>${zh ? "键盘与滚动" : "Keyboard and scroll"}</span></div>
+              <div class="settings-row"><div><strong>${zh ? "隐私安全日志" : "Privacy-safe Log"}</strong><small>${zh ? "不包含标题、正文、密码或图片" : "Excludes titles, memo text, passwords and images"}</small></div><button class="small-btn" data-action="export-diagnostics">${icon.history} ${tr("Logs")}</button></div>
+            </div>
+          </section>
         </div>
       </div>
     </section>
@@ -3303,6 +3404,11 @@ app.addEventListener("click", async (event) => {
     render();
     return;
   }
+  if (action === "toggle-language") {
+    setAppLanguage(appLanguage === "zh-CN" ? "en" : "zh-CN");
+    render();
+    return;
+  }
   const id = target.dataset.id;
 
   if (action === "wheel-step") {
@@ -3453,9 +3559,28 @@ if (action === "back") {
   if (action === "input-diagnostics") {
     state.settings.inputDiagnostics = !state.settings.inputDiagnostics;
     addDiagnosticLog("input.diagnostics.toggle", { enabled: state.settings.inputDiagnostics });
+    if (state.settings.inputDiagnostics) void runAdvancedDiagnostics();
     scheduleSave();
     render();
   }
+  if (action === "auto-backup-interval") {
+    state.settings.autoBackupInterval = ["daily", "weekly"].includes(target.dataset.value) ? target.dataset.value : "off";
+    scheduleSave();
+    render();
+    if (state.settings.autoBackupInterval !== "off") void runAutoBackup(true).then(() => ui.view === "settings" && render());
+  }
+  if (action === "auto-backup-overwrite") {
+    state.settings.autoBackupOverwrite = state.settings.autoBackupOverwrite === false;
+    scheduleSave();
+    render();
+  }
+  if (action === "auto-backup-retention") {
+    const retention = Number(target.dataset.value);
+    state.settings.autoBackupRetention = [5, 10, 20].includes(retention) ? retention : 5;
+    scheduleSave();
+    render();
+  }
+  if (action === "restore-auto-backup") void restoreLatestAutoBackup();
   if (action === "tab") {
     ui.tab = id;
     render();
@@ -3716,11 +3841,18 @@ function captureInputDiagnostics(trigger, extra = {}, log = true) {
   const scrollerRect = scroller.getBoundingClientRect();
   const viewportHeight = viewport?.height || window.innerHeight;
   const viewportTop = viewport?.offsetTop || 0;
+  // WKWebView reports caret/client rects in visual-viewport coordinates while
+  // offsetTop describes the layout viewport shift. Keep both values in the log,
+  // but do not add offsetTop to the caret visibility boundary.
+  const visibleTop = 0;
+  const visibleBottom = viewportHeight;
   const snapshot = {
     trigger,
     innerHeight: roundedMetric(window.innerHeight),
     viewportHeight: roundedMetric(viewportHeight),
     viewportTop: roundedMetric(viewportTop),
+    visibleTop: roundedMetric(visibleTop),
+    visibleBottom: roundedMetric(visibleBottom),
     keyboardHeight: roundedMetric(Math.max(0, window.innerHeight - viewportHeight - viewportTop)),
     scrollTop: roundedMetric(scroller.scrollTop),
     scrollHeight: roundedMetric(scroller.scrollHeight),
@@ -3733,13 +3865,8 @@ function captureInputDiagnostics(trigger, extra = {}, log = true) {
     ...extra
   };
   editorDiagnosticSnapshot = snapshot;
-  const panel = document.querySelector("[data-input-diagnostics]");
-  if (panel) {
-    const value = (key) => snapshot[key] == null ? "-" : snapshot[key];
-    panel.innerHTML = `<strong>INPUT DIAGNOSTICS</strong><span>${escapeHtml(trigger)}</span><dl><dt>keyboard</dt><dd>${value("keyboardHeight")}</dd><dt>viewport</dt><dd>${value("viewportHeight")} + ${value("viewportTop")}</dd><dt>scroll</dt><dd>${value("scrollTop")} / ${value("scrollHeight")}</dd><dt>caret</dt><dd>${value("caretTop")} - ${value("caretBottom")} (${value("caretHeight")})</dd></dl>`;
-  }
   const now = Date.now();
-  if (log && now - editorDiagnosticLastLogAt >= 120) {
+  if (log && now - editorDiagnosticLastLogAt >= 600) {
     editorDiagnosticLastLogAt = now;
     addDiagnosticLog(`input.${trigger}`, snapshot);
   }
@@ -3762,11 +3889,13 @@ function keepEditorCaretVisible(force = false) {
       return;
     }
     const viewport = window.visualViewport;
-    const viewportTop = viewport?.offsetTop || 0;
-    const keyboardTop = viewportTop + (viewport?.height || window.innerHeight);
+    const viewportHeight = viewport?.height || window.innerHeight;
     const scrollerRect = scroller.getBoundingClientRect();
-    const safeTop = Math.max(scrollerRect.top, viewportTop) + 8;
-    const safeBottom = Math.min(scrollerRect.bottom, keyboardTop) - 20;
+    const safeTop = Math.max(scrollerRect.top, 0) + 8;
+    // On iOS WKWebView getBoundingClientRect() is relative to the visible
+    // viewport during keyboard pan. Adding visualViewport.offsetTop here made
+    // the keyboard boundary hundreds of pixels too low and hid the caret.
+    const safeBottom = Math.min(scrollerRect.bottom, viewportHeight) - 32;
     const before = scroller.scrollTop;
     let delta = 0;
     if (caretRect.bottom > safeBottom) {
